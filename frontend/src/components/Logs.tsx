@@ -19,14 +19,18 @@ import {
   Trash2,
   Settings,
   Wifi,
-  WifiOff
+  WifiOff,
+  Eye,
+  EyeOff,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
-import { LogEntry } from '../types';
+import { LogEntry, FilterOptions } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import toast from 'react-hot-toast';
-import { format } from 'date-fns';
+import { format, formatDistanceToNow } from 'date-fns';
 
 const Logs: React.FC = () => {
   const { 
@@ -49,10 +53,13 @@ const Logs: React.FC = () => {
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [components, setComponents] = useState<string[]>([]);
+  const [showFilters, setShowFilters] = useState(false);
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
+  const [lastUpdateTime, setLastUpdateTime] = useState<Date>(new Date());
   
   const logsEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { isConnected } = useWebSocket();
+  const { isConnected } = useWebSocket(handleWebSocketMessage);
 
   const logLevels = ['all', 'INFO', 'WARN', 'ERROR', 'DEBUG'];
   const logIcons = {
@@ -76,41 +83,55 @@ const Logs: React.FC = () => {
     DEBUG: 'text-gray-800 dark:text-gray-400'
   };
 
-  // Load logs on component mount
   useEffect(() => {
     fetchLogs();
   }, []);
 
-  // Filter logs when dependencies change
   useEffect(() => {
     filterLogs();
-  }, [logs, searchTerm, levelFilter, componentFilter]);
+  }, [logs, searchTerm, levelFilter, componentFilter, sortDirection]);
 
-  // Auto-scroll when new logs are added
   useEffect(() => {
     if (autoScroll && logsEndRef.current && logs.length > 0) {
       logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
   }, [filteredLogs, autoScroll]);
 
-  // Extract unique components
   useEffect(() => {
     const uniqueComponents = Array.from(new Set(logs.map(log => log.component))).sort();
     setComponents(uniqueComponents);
   }, [logs]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setLastUpdateTime(new Date());
+    }, 30000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  function handleWebSocketMessage(event: any) {
+    if (event.type === 'log_entry' && isStreaming && event.data) {
+      addLog(event.data);
+      setLastUpdateTime(new Date());
+    }
+  }
 
   const fetchLogs = useCallback(async (pageNum = 1, append = false) => {
     try {
       if (!append) setLogsLoading(true);
       setLogsError(null);
       
-      const response = await apiService.getLogs({
+      const params: any = {
         page: pageNum,
         limit: 100,
-        ...(levelFilter !== 'all' && { level: levelFilter }),
-        ...(componentFilter !== 'all' && { component: componentFilter }),
-        ...(searchTerm && { search: searchTerm })
-      }, false); // Don't use cache for logs
+      };
+
+      if (levelFilter !== 'all') params.level = levelFilter;
+      if (componentFilter !== 'all') params.component = componentFilter;
+      if (searchTerm.trim()) params.search = searchTerm.trim();
+
+      const response = await apiService.getLogs(params, false);
 
       if (append) {
         setLogs([...logs, ...response.data]);
@@ -119,8 +140,13 @@ const Logs: React.FC = () => {
       }
 
       setHasMore(response.pagination ? pageNum < response.pagination.totalPages : false);
+      setLastUpdateTime(new Date());
+      
+      if (response.data.length === 0 && pageNum === 1) {
+        toast.info('No logs found matching your criteria');
+      }
     } catch (error: any) {
-      const errorMessage = error.response?.data?.error || 'Failed to fetch logs';
+      const errorMessage = error.message || 'Failed to load logs. Please try again.';
       setLogsError(errorMessage);
       toast.error(errorMessage);
     } finally {
@@ -129,12 +155,14 @@ const Logs: React.FC = () => {
   }, [levelFilter, componentFilter, searchTerm, logs, setLogs, setLogsLoading, setLogsError]);
 
   const filterLogs = useCallback(() => {
-    let filtered = logs;
+    let filtered = [...logs];
 
-    if (searchTerm) {
+    if (searchTerm.trim()) {
+      const searchLower = searchTerm.toLowerCase();
       filtered = filtered.filter(log =>
-        log.message.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        log.component.toLowerCase().includes(searchTerm.toLowerCase())
+        log.message.toLowerCase().includes(searchLower) ||
+        log.component.toLowerCase().includes(searchLower) ||
+        (log.metadata && JSON.stringify(log.metadata).toLowerCase().includes(searchLower))
       );
     }
 
@@ -146,8 +174,14 @@ const Logs: React.FC = () => {
       filtered = filtered.filter(log => log.component === componentFilter);
     }
 
+    filtered.sort((a, b) => {
+      const timeA = new Date(a.timestamp).getTime();
+      const timeB = new Date(b.timestamp).getTime();
+      return sortDirection === 'desc' ? timeB - timeA : timeA - timeB;
+    });
+
     setFilteredLogs(filtered);
-  }, [logs, searchTerm, levelFilter, componentFilter]);
+  }, [logs, searchTerm, levelFilter, componentFilter, sortDirection]);
 
   const loadMore = () => {
     const nextPage = page + 1;
@@ -166,6 +200,11 @@ const Logs: React.FC = () => {
   };
 
   const exportLogs = () => {
+    if (filteredLogs.length === 0) {
+      toast.error('No logs to export');
+      return;
+    }
+
     const exportData = filteredLogs.map(log => ({
       timestamp: log.timestamp,
       level: log.level,
@@ -178,21 +217,22 @@ const Logs: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `logs-${format(new Date(), 'yyyy-MM-dd-HH-mm')}.json`;
+    a.download = `system-logs-${format(new Date(), 'yyyy-MM-dd-HHmm')}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast.success('Logs exported successfully');
+    toast.success(`Exported ${filteredLogs.length} log entries`);
   };
 
   const clearLogs = () => {
-    if (!confirm('Are you sure you want to clear all logs? This action cannot be undone.')) {
+    if (!confirm('Are you sure you want to clear all logs from view? This action cannot be undone.')) {
       return;
     }
     setLogs([]);
     setFilteredLogs([]);
-    toast.success('Logs cleared');
+    setExpandedLogs(new Set());
+    toast.success('Logs cleared from view');
   };
 
   const clearFilters = () => {
@@ -200,158 +240,210 @@ const Logs: React.FC = () => {
     setLevelFilter('all');
     setComponentFilter('all');
     setPage(1);
+    setShowFilters(false);
     toast.success('Filters cleared');
   };
 
   const refreshLogs = () => {
     setPage(1);
+    setExpandedLogs(new Set());
     fetchLogs(1, false);
   };
 
-  const handleScroll = () => {
+  const handleScroll = useCallback(() => {
     if (containerRef.current) {
       const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
       const isNearBottom = scrollHeight - scrollTop - clientHeight < 100;
       setAutoScroll(isNearBottom);
     }
-  };
+  }, []);
 
   const toggleStreaming = () => {
-    setIsStreaming(!isStreaming);
-    if (!isStreaming) {
-      toast.success('Log streaming enabled');
+    const newStreaming = !isStreaming;
+    setIsStreaming(newStreaming);
+    
+    if (newStreaming) {
+      toast.success('Real-time log streaming enabled');
     } else {
-      toast.success('Log streaming disabled');
+      toast.success('Real-time log streaming paused');
     }
   };
 
-  // Handle real-time log updates via WebSocket
-  const handleWebSocketMessage = useCallback((event: any) => {
-    if (event.type === 'log_entry' && isStreaming) {
-      addLog(event.data);
-    }
-  }, [isStreaming, addLog]);
+  const toggleSortDirection = () => {
+    setSortDirection(prev => prev === 'desc' ? 'asc' : 'desc');
+  };
 
-  // Loading State
+  const getLevelStats = () => {
+    const stats = logLevels.slice(1).map(level => ({
+      level,
+      count: logs.filter(log => log.level === level).length
+    }));
+    return stats;
+  };
+
+  const getFormattedTimestamp = (timestamp: string) => {
+    const date = new Date(timestamp);
+    return {
+      time: format(date, 'HH:mm:ss'),
+      date: format(date, 'MMM dd'),
+      relative: formatDistanceToNow(date, { addSuffix: true })
+    };
+  };
+
   if (logsLoading && logs.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
         <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-        <p className="text-gray-600 dark:text-gray-400">Loading logs...</p>
+        <p className="text-gray-600 dark:text-gray-400">Loading system logs...</p>
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div className="flex flex-col sm:flex-row gap-4 flex-1">
           <div className="relative flex-1 max-w-md">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
             <input
               type="text"
-              placeholder="Search logs..."
+              placeholder="Search logs by message, component, or metadata..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 focus:ring-0 transition-colors"
+              className="w-full pl-10 pr-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 focus:ring-0 transition-colors text-sm"
             />
           </div>
 
-          <select
-            value={levelFilter}
-            onChange={(e) => setLevelFilter(e.target.value)}
-            className="px-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 min-w-[120px]"
+          <button
+            onClick={() => setShowFilters(!showFilters)}
+            className={`px-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 transition-colors text-sm flex items-center space-x-2 ${
+              showFilters ? 'bg-blue-50 dark:bg-blue-900/20 border-blue-300' : ''
+            }`}
           >
-            {logLevels.map(level => (
-              <option key={level} value={level}>
-                {level === 'all' ? 'All Levels' : level}
-              </option>
-            ))}
-          </select>
-
-          <select
-            value={componentFilter}
-            onChange={(e) => setComponentFilter(e.target.value)}
-            className="px-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 min-w-[140px]"
-          >
-            <option value="all">All Components</option>
-            {components.map(component => (
-              <option key={component} value={component}>
-                {component}
-              </option>
-            ))}
-          </select>
+            <Filter className="w-4 h-4" />
+            <span>Filters</span>
+            {(levelFilter !== 'all' || componentFilter !== 'all') && (
+              <span className="bg-blue-500 text-white text-xs rounded-full w-2 h-2"></span>
+            )}
+          </button>
         </div>
 
-        <div className="flex items-center space-x-3">
-          <div className="flex items-center space-x-2 px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg">
+        <div className="flex items-center space-x-3 flex-wrap gap-2">
+          <div className="flex items-center space-x-2 px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg text-sm">
             {isConnected ? (
               <Wifi className="w-4 h-4 text-green-500" />
             ) : (
               <WifiOff className="w-4 h-4 text-red-500" />
             )}
-            <span className="text-sm text-gray-600 dark:text-gray-400">
+            <span className="text-gray-600 dark:text-gray-400">
               {isConnected ? 'Connected' : 'Disconnected'}
+            </span>
+          </div>
+
+          <div className="flex items-center space-x-2 px-3 py-2 bg-gray-100 dark:bg-gray-700 rounded-lg text-sm">
+            <Clock className="w-4 h-4 text-gray-500" />
+            <span className="text-gray-600 dark:text-gray-400">
+              {formatDistanceToNow(lastUpdateTime, { addSuffix: true })}
             </span>
           </div>
 
           <motion.button
             whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={toggleStreaming}
-            className={`px-4 py-2 rounded-lg transition-colors ${
+            className={`px-4 py-2 rounded-lg transition-colors text-sm flex items-center space-x-2 ${
               isStreaming 
                 ? 'bg-green-600 hover:bg-green-700 text-white' 
                 : 'bg-gray-600 hover:bg-gray-700 text-white'
             }`}
           >
-            {isStreaming ? <Pause className="w-4 h-4 mr-2" /> : <Play className="w-4 h-4 mr-2" />}
-            {isStreaming ? 'Stop Stream' : 'Start Stream'}
+            {isStreaming ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+            <span>{isStreaming ? 'Pause' : 'Stream'}</span>
           </motion.button>
 
           <motion.button
             whileHover={{ scale: 1.05 }}
-            onClick={clearFilters}
-            className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors"
-          >
-            <Filter className="w-4 h-4 mr-2" />
-            Clear
-          </motion.button>
-
-          <motion.button
-            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={exportLogs}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors"
+            disabled={filteredLogs.length === 0}
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
           >
-            <Download className="w-4 h-4 mr-2" />
-            Export
+            <Download className="w-4 h-4" />
+            <span>Export</span>
           </motion.button>
 
           <motion.button
             whileHover={{ scale: 1.05 }}
-            onClick={clearLogs}
-            className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
-          >
-            <Trash2 className="w-4 h-4 mr-2" />
-            Clear
-          </motion.button>
-
-          <motion.button
-            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={refreshLogs}
             disabled={logsLoading}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white rounded-lg transition-colors"
+            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
           >
-            <RefreshCw className={`w-4 h-4 mr-2 ${logsLoading ? 'animate-spin' : ''}`} />
-            Refresh
+            <RefreshCw className={`w-4 h-4 ${logsLoading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
           </motion.button>
         </div>
       </div>
 
-      {/* Stats */}
+      <AnimatePresence>
+        {showFilters && (
+          <motion.div
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+            className="bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 p-4 space-y-4"
+          >
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Log Level
+                </label>
+                <select
+                  value={levelFilter}
+                  onChange={(e) => setLevelFilter(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:border-blue-500 text-sm"
+                >
+                  {logLevels.map(level => (
+                    <option key={level} value={level}>
+                      {level === 'all' ? 'All Levels' : level}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Component
+                </label>
+                <select
+                  value={componentFilter}
+                  onChange={(e) => setComponentFilter(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:border-blue-500 text-sm"
+                >
+                  <option value="all">All Components</option>
+                  {components.map(component => (
+                    <option key={component} value={component}>
+                      {component}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="flex items-end">
+                <button
+                  onClick={clearFilters}
+                  className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors text-sm"
+                >
+                  Clear Filters
+                </button>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-        {logLevels.slice(1).map(level => {
-          const count = logs.filter(log => log.level === level).length;
+        {getLevelStats().map(({ level, count }) => {
           const Icon = logIcons[level as keyof typeof logIcons];
           
           return (
@@ -371,7 +463,7 @@ const Logs: React.FC = () => {
                 </div>
                 <div>
                   <p className="text-sm text-gray-600 dark:text-gray-400">{level}</p>
-                  <p className="text-lg font-semibold text-gray-900 dark:text-white">{count}</p>
+                  <p className="text-lg font-semibold text-gray-900 dark:text-white">{count.toLocaleString()}</p>
                 </div>
               </div>
             </motion.div>
@@ -379,29 +471,42 @@ const Logs: React.FC = () => {
         })}
       </div>
 
-      {/* Controls */}
       <div className="flex items-center justify-between">
         <div className="text-sm text-gray-600 dark:text-gray-400">
-          Showing {filteredLogs.length} of {logs.length} log entries
+          Showing {filteredLogs.length.toLocaleString()} of {logs.length.toLocaleString()} log entries
         </div>
 
         <div className="flex items-center space-x-4">
-          <span className="text-sm text-gray-600 dark:text-gray-400">Auto-scroll:</span>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            onClick={() => setAutoScroll(!autoScroll)}
-            className={`p-2 rounded-lg transition-colors ${
-              autoScroll 
-                ? 'bg-green-100 text-green-600 dark:bg-green-900/20 dark:text-green-400' 
-                : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
-            }`}
+          <button
+            onClick={toggleSortDirection}
+            className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 transition-colors"
           >
-            {autoScroll ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
-          </motion.button>
+            <span>Sort by time</span>
+            {sortDirection === 'desc' ? (
+              <ArrowDown className="w-4 h-4" />
+            ) : (
+              <ArrowUp className="w-4 h-4" />
+            )}
+          </button>
+
+          <div className="flex items-center space-x-2">
+            <span className="text-sm text-gray-600 dark:text-gray-400">Auto-scroll:</span>
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setAutoScroll(!autoScroll)}
+              className={`p-2 rounded-lg transition-colors ${
+                autoScroll 
+                  ? 'bg-green-100 text-green-600 dark:bg-green-900/20 dark:text-green-400' 
+                  : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400'
+              }`}
+            >
+              {autoScroll ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
+            </motion.button>
+          </div>
         </div>
       </div>
 
-      {/* Logs */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -415,12 +520,14 @@ const Logs: React.FC = () => {
           <AnimatePresence>
             {filteredLogs.map((log, index) => {
               const Icon = logIcons[log.level as keyof typeof logIcons] || Info;
-              const isExpanded = expandedLogs.has(log.id || `${index}`);
+              const logId = log.id || `${index}-${log.timestamp}`;
+              const isExpanded = expandedLogs.has(logId);
               const hasMetadata = log.metadata && Object.keys(log.metadata).length > 0;
+              const timestamps = getFormattedTimestamp(log.timestamp);
 
               return (
                 <motion.div
-                  key={log.id || `${index}-${log.timestamp}`}
+                  key={logId}
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: 20 }}
@@ -451,9 +558,9 @@ const Logs: React.FC = () => {
 
                         <div className="flex items-center space-x-2 text-xs text-gray-500 dark:text-gray-400 ml-auto">
                           <Clock className="w-3 h-3" />
-                          <span>{format(new Date(log.timestamp), 'HH:mm:ss')}</span>
+                          <span title={timestamps.relative}>{timestamps.time}</span>
                           <Calendar className="w-3 h-3 ml-2" />
-                          <span>{format(new Date(log.timestamp), 'MMM dd')}</span>
+                          <span>{timestamps.date}</span>
                         </div>
                       </div>
 
@@ -465,7 +572,8 @@ const Logs: React.FC = () => {
                         <div className="mt-3">
                           <motion.button
                             whileHover={{ scale: 1.01 }}
-                            onClick={() => toggleLogExpansion(log.id || `${index}`)}
+                            whileTap={{ scale: 0.99 }}
+                            onClick={() => toggleLogExpansion(logId)}
                             className="flex items-center space-x-2 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
                           >
                             {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
@@ -480,7 +588,7 @@ const Logs: React.FC = () => {
                                 exit={{ opacity: 0, height: 0 }}
                                 className="mt-2 p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-600"
                               >
-                                <pre className="text-xs text-gray-700 dark:text-gray-300 overflow-x-auto">
+                                <pre className="text-xs text-gray-700 dark:text-gray-300 overflow-x-auto whitespace-pre-wrap">
                                   {JSON.stringify(log.metadata, null, 2)}
                                 </pre>
                               </motion.div>
@@ -499,17 +607,18 @@ const Logs: React.FC = () => {
             <div className="text-center py-4">
               <motion.button
                 whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
                 onClick={loadMore}
                 disabled={logsLoading}
-                className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors"
+                className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2 mx-auto"
               >
                 {logsLoading ? (
-                  <div className="flex items-center">
-                    <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                    Loading...
-                  </div>
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Loading...</span>
+                  </>
                 ) : (
-                  'Load More'
+                  <span>Load More</span>
                 )}
               </motion.button>
             </div>
@@ -523,14 +632,22 @@ const Logs: React.FC = () => {
             <Server className="w-12 h-12 text-gray-400 mx-auto mb-4" />
             <div className="text-gray-500 dark:text-gray-400 mb-2">
               {searchTerm || levelFilter !== 'all' || componentFilter !== 'all' 
-                ? 'No logs match your filters' 
+                ? 'No logs match your current filters' 
                 : 'No logs available'
               }
             </div>
             {(!searchTerm && levelFilter === 'all' && componentFilter === 'all') && (
               <p className="text-sm text-gray-400 dark:text-gray-500">
-                Logs will appear here as your system generates them
+                System logs will appear here as they are generated
               </p>
+            )}
+            {(searchTerm || levelFilter !== 'all' || componentFilter !== 'all') && (
+              <button
+                onClick={clearFilters}
+                className="mt-3 px-4 py-2 text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 transition-colors"
+              >
+                Clear filters to see all logs
+              </button>
             )}
           </div>
         )}

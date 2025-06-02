@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useStore } from '../store/useStore';
 import { WSEvent, APIKey, LogEntry } from '../types';
 import toast from 'react-hot-toast';
@@ -7,9 +7,10 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   const reconnectAttempts = useRef(0);
-  const isConnectedRef = useRef(false);
+  const [isConnected, setIsConnected] = useState(false);
   const maxReconnectAttempts = 5;
   const baseReconnectDelay = 1000;
+  const mountedRef = useRef(true);
 
   const { 
     addApiKey, 
@@ -19,8 +20,9 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
   } = useStore();
 
   const handleMessage = useCallback((event: WSEvent) => {
+    if (!mountedRef.current) return;
+
     try {
-      // Handle different event types
       switch (event.type) {
         case 'key_created':
           if (event.data) {
@@ -50,15 +52,15 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           break;
 
         case 'system_update':
-          // Handle system-level updates
-          console.log('System update received:', event.data);
+          if (event.data?.message) {
+            toast.info(event.data.message);
+          }
           break;
 
         default:
           console.log('Unknown WebSocket event type:', event.type);
       }
 
-      // Call external message handler if provided
       if (onMessage) {
         onMessage(event);
       }
@@ -67,33 +69,74 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     }
   }, [addApiKey, updateApiKey, removeApiKey, addLog, onMessage]);
 
-  const connect = useCallback(() => {
-    try {
-      // Don't create multiple connections
-      if (ws.current?.readyState === WebSocket.CONNECTING || 
-          ws.current?.readyState === WebSocket.OPEN) {
-        return;
+  const cleanup = useCallback(() => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = undefined;
+    }
+    
+    if (ws.current) {
+      ws.current.onopen = null;
+      ws.current.onmessage = null;
+      ws.current.onclose = null;
+      ws.current.onerror = null;
+      
+      if (ws.current.readyState === WebSocket.OPEN || 
+          ws.current.readyState === WebSocket.CONNECTING) {
+        ws.current.close(1000, 'Component unmounting');
       }
+      
+      ws.current = null;
+    }
+    
+    setIsConnected(false);
+  }, []);
+
+  const connect = useCallback(() => {
+    if (!mountedRef.current) return;
+    
+    if (ws.current?.readyState === WebSocket.CONNECTING || 
+        ws.current?.readyState === WebSocket.OPEN) {
+      return;
+    }
+
+    const token = localStorage.getItem('token');
+    if (!token) {
+      console.log('No authentication token found, skipping WebSocket connection');
+      return;
+    }
+
+    try {
+      cleanup();
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/v1/ws`;
+      const wsUrl = `${protocol}//${window.location.host}/api/v1/ws?token=${encodeURIComponent(token)}`;
       
       console.log('Attempting WebSocket connection to:', wsUrl);
+      
       ws.current = new WebSocket(wsUrl);
       
       ws.current.onopen = () => {
+        if (!mountedRef.current) return;
+        
         console.log('WebSocket connected successfully');
-        isConnectedRef.current = true;
+        setIsConnected(true);
         reconnectAttempts.current = 0;
         
-        // Clear any pending reconnection attempts
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
           reconnectTimeoutRef.current = undefined;
         }
+
+        toast.success('Real-time connection established', { 
+          id: 'ws-connection',
+          duration: 2000 
+        });
       };
 
       ws.current.onmessage = (event) => {
+        if (!mountedRef.current) return;
+        
         try {
           const data = JSON.parse(event.data) as WSEvent;
           handleMessage(data);
@@ -103,56 +146,59 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       };
 
       ws.current.onclose = (event) => {
-        console.log('WebSocket disconnected:', event.code, event.reason);
-        isConnectedRef.current = false;
+        if (!mountedRef.current) return;
         
-        // Only attempt reconnection if it wasn't a normal closure and we haven't exceeded max attempts
+        console.log('WebSocket disconnected:', event.code, event.reason);
+        setIsConnected(false);
+        
         if (event.code !== 1000 && reconnectAttempts.current < maxReconnectAttempts) {
           const delay = Math.min(
             baseReconnectDelay * Math.pow(2, reconnectAttempts.current),
-            30000 // Max 30 seconds
+            30000
           );
           
           console.log(`Attempting reconnection in ${delay}ms (attempt ${reconnectAttempts.current + 1}/${maxReconnectAttempts})`);
           
           reconnectTimeoutRef.current = setTimeout(() => {
-            reconnectAttempts.current++;
-            connect();
+            if (mountedRef.current) {
+              reconnectAttempts.current++;
+              connect();
+            }
           }, delay);
         } else if (reconnectAttempts.current >= maxReconnectAttempts) {
           console.error('Max WebSocket reconnection attempts reached');
-          toast.error('Connection lost. Please refresh the page.');
+          toast.error('Connection lost. Please refresh the page.', {
+            id: 'ws-connection-lost',
+            duration: 0
+          });
+        }
+
+        if (event.code !== 1000) {
+          toast.error('Real-time connection lost', { 
+            id: 'ws-connection',
+            duration: 3000 
+          });
         }
       };
 
       ws.current.onerror = (error) => {
+        if (!mountedRef.current) return;
+        
         console.error('WebSocket error:', error);
-        isConnectedRef.current = false;
+        setIsConnected(false);
       };
+
     } catch (error) {
       console.error('WebSocket connection error:', error);
-      isConnectedRef.current = false;
+      setIsConnected(false);
     }
-  }, [handleMessage]);
+  }, [handleMessage, cleanup]);
 
   const disconnect = useCallback(() => {
     console.log('Disconnecting WebSocket');
-    
-    // Clear reconnection timer
-    if (reconnectTimeoutRef.current) {
-      clearTimeout(reconnectTimeoutRef.current);
-      reconnectTimeoutRef.current = undefined;
-    }
-    
-    // Close connection
-    if (ws.current) {
-      ws.current.close(1000, 'Component unmounting');
-      ws.current = null;
-    }
-    
-    isConnectedRef.current = false;
+    cleanup();
     reconnectAttempts.current = 0;
-  }, []);
+  }, [cleanup]);
 
   const sendMessage = useCallback((message: any) => {
     if (ws.current?.readyState === WebSocket.OPEN) {
@@ -169,71 +215,91 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     }
   }, []);
 
-  // Initialize connection when authentication is available
   useEffect(() => {
+    mountedRef.current = true;
+    
     const token = localStorage.getItem('token');
     if (token) {
       console.log('Initializing WebSocket connection');
-      connect();
+      const timeoutId = setTimeout(connect, 100);
+      return () => clearTimeout(timeoutId);
     }
 
     return () => {
+      mountedRef.current = false;
       console.log('Cleaning up WebSocket connection');
       disconnect();
     };
   }, [connect, disconnect]);
 
-  // Handle page visibility changes to manage connection
   useEffect(() => {
     const handleVisibilityChange = () => {
+      if (!mountedRef.current) return;
+      
       if (document.hidden) {
-        // Page is hidden, we could optionally close connection to save resources
-        console.log('Page hidden');
+        console.log('Page hidden - WebSocket will maintain connection');
       } else {
-        // Page is visible, ensure connection is active
-        console.log('Page visible');
-        if (!isConnectedRef.current) {
+        console.log('Page visible - checking WebSocket connection');
+        if (!isConnected) {
           const token = localStorage.getItem('token');
           if (token) {
-            connect();
+            setTimeout(connect, 500);
           }
         }
       }
     };
 
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, [connect]);
-
-  // Handle online/offline events
-  useEffect(() => {
     const handleOnline = () => {
+      if (!mountedRef.current) return;
+      
       console.log('Network online - attempting WebSocket reconnection');
-      if (!isConnectedRef.current) {
+      if (!isConnected) {
         const token = localStorage.getItem('token');
         if (token) {
-          connect();
+          reconnectAttempts.current = 0;
+          setTimeout(connect, 1000);
         }
       }
     };
 
     const handleOffline = () => {
       console.log('Network offline - WebSocket will disconnect');
+      setIsConnected(false);
     };
 
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'token') {
+        if (e.newValue) {
+          console.log('Auth token added - connecting WebSocket');
+          setTimeout(connect, 500);
+        } else {
+          console.log('Auth token removed - disconnecting WebSocket');
+          disconnect();
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    window.addEventListener('storage', handleStorageChange);
 
     return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('storage', handleStorageChange);
     };
-  }, [connect]);
+  }, [connect, disconnect, isConnected]);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   return { 
-    isConnected: isConnectedRef.current,
+    isConnected,
     sendMessage,
     reconnect: connect,
     disconnect

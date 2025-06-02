@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -123,6 +124,11 @@ type TokenResponse struct {
 	ExpiresAt int64  `json:"expiresAt"`
 }
 
+type WSMessage struct {
+	Type string      `json:"type"`
+	Data interface{} `json:"data"`
+}
+
 type Cache struct {
 	keyToAPIKey sync.Map
 	hits        int64
@@ -171,79 +177,6 @@ func (c *Cache) ListKeys() []APIKey {
 	return keys
 }
 
-type FixedWindowRateLimiter struct {
-	windowStart int64
-	count       int64
-	limit       int64
-	mutex       sync.Mutex
-}
-
-func NewFixedWindowRateLimiter(limit int) *FixedWindowRateLimiter {
-	return &FixedWindowRateLimiter{
-		windowStart: time.Now().UTC().Unix(),
-		limit:       int64(limit),
-	}
-}
-
-func (fw *FixedWindowRateLimiter) Allow() bool {
-	fw.mutex.Lock()
-	defer fw.mutex.Unlock()
-
-	now := time.Now().UTC().Unix()
-	if now-fw.windowStart >= 60 {
-		fw.windowStart = now
-		fw.count = 1
-		return true
-	}
-
-	if fw.count < fw.limit {
-		fw.count++
-		return true
-	}
-
-	return false
-}
-
-type CircuitBreaker struct {
-	maxFailures int
-	failures    int
-	lastFailure time.Time
-	timeout     time.Duration
-	mutex       sync.RWMutex
-}
-
-func NewCircuitBreaker(maxFailures int, timeout time.Duration) *CircuitBreaker {
-	return &CircuitBreaker{
-		maxFailures: maxFailures,
-		timeout:     timeout,
-	}
-}
-
-func (cb *CircuitBreaker) Call(fn func() error) error {
-	cb.mutex.RLock()
-	if cb.failures >= cb.maxFailures {
-		if time.Since(cb.lastFailure) < cb.timeout {
-			cb.mutex.RUnlock()
-			return errors.New("circuit breaker open")
-		}
-	}
-	cb.mutex.RUnlock()
-
-	err := fn()
-
-	cb.mutex.Lock()
-	defer cb.mutex.Unlock()
-
-	if err != nil {
-		cb.failures++
-		cb.lastFailure = time.Now()
-	} else {
-		cb.failures = 0
-	}
-
-	return err
-}
-
 type APIKeyManager struct {
 	mongoClient       *mongo.Client
 	apiKeysCollection *mongo.Collection
@@ -251,103 +184,92 @@ type APIKeyManager struct {
 	cache             *Cache
 	config            *Config
 	configMutex       sync.RWMutex
-	rateLimiters      sync.Map
-	stopChan          chan struct{}
-	wg                sync.WaitGroup
-	circuitBreaker    *CircuitBreaker
 	startTime         time.Time
 	upgrader          websocket.Upgrader
 	wsClients         sync.Map
-	eventChan         chan interface{}
+	eventChan         chan WSMessage
+	shutdownOnce      sync.Once
+	ctx               context.Context
+	cancel            context.CancelFunc
+	mongoConnected    bool
+	mongoMutex        sync.RWMutex
 }
 
 func NewAPIKeyManager(config *Config) *APIKeyManager {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &APIKeyManager{
-		cache:          &Cache{},
-		config:         config,
-		stopChan:       make(chan struct{}),
-		circuitBreaker: NewCircuitBreaker(5, 30*time.Second),
-		startTime:      time.Now(),
+		cache:     &Cache{},
+		config:    config,
+		startTime: time.Now(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
 			},
+			ReadBufferSize:  1024,
+			WriteBufferSize: 1024,
 		},
-		eventChan: make(chan interface{}, 100),
+		eventChan: make(chan WSMessage, 100),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
 func loadConfig(filePath string) (*Config, error) {
+	config := &Config{
+		ServerPort:        "3001",
+		MongoURI:          "mongodb://localhost:27017",
+		DatabaseName:      "apikeys",
+		ApiKeysCollection: "keys",
+		LogsCollection:    "logs",
+		ReadTimeout:       10,
+		WriteTimeout:      10,
+		IdleTimeout:       60,
+		JWTSecret:         "your-secret-key-change-this",
+		AdminPassword:     "admin123",
+		MaxRetries:        3,
+		RetryDelay:        1000,
+	}
+
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		log.Printf("Config file not found, using defaults")
+		return config, nil
+	}
+
 	file, err := os.Open(filePath)
 	if err != nil {
-		return nil, err
+		log.Printf("Error opening config file, using defaults: %v", err)
+		return config, nil
 	}
 	defer file.Close()
 
 	decoder := json.NewDecoder(file)
-	config := &Config{}
 	if err := decoder.Decode(config); err != nil {
-		return nil, err
+		log.Printf("Error parsing config file, using defaults: %v", err)
+		return config, nil
 	}
 
-	if config.MaxRetries == 0 {
-		config.MaxRetries = 3
-	}
-	if config.RetryDelay == 0 {
-		config.RetryDelay = 1000
-	}
 	return config, nil
 }
 
-func (m *APIKeyManager) watchConfigAndReload(filePath string) {
-	watcher, err := fsnotify.NewWatcher()
-	if err != nil {
-		m.logError("Failed to create file watcher", err, "component", "config")
-		return
-	}
-	defer watcher.Close()
-
-	if err := watcher.Add(filePath); err != nil {
-		m.logError("Failed to add file to watcher", err, "component", "config")
-		return
-	}
-
-	for {
-		select {
-		case event := <-watcher.Events:
-			if event.Op&fsnotify.Write == fsnotify.Write {
-				newConfig, err := loadConfig(filePath)
-				if err == nil {
-					m.configMutex.Lock()
-					m.config = newConfig
-					m.configMutex.Unlock()
-					m.logInfo("Configuration reloaded successfully", "component", "config")
-				} else {
-					m.logError("Failed to reload configuration", err, "component", "config")
-				}
-			}
-		case err := <-watcher.Errors:
-			m.logError("Watcher error", err, "component", "config")
-		case <-m.stopChan:
-			return
-		}
-	}
-}
-
 func (m *APIKeyManager) connectMongo() error {
+	log.Printf("Attempting to connect to MongoDB at: %s", m.config.MongoURI)
+	
 	clientOptions := options.Client().
 		ApplyURI(m.config.MongoURI).
-		SetMaxPoolSize(100).
-		SetMinPoolSize(10).
+		SetMaxPoolSize(10).
+		SetMinPoolSize(1).
 		SetRetryWrites(true).
-		SetRetryReads(true)
+		SetRetryReads(true).
+		SetConnectTimeout(10 * time.Second).
+		SetServerSelectionTimeout(10 * time.Second)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	var err error
 	m.mongoClient, err = mongo.Connect(ctx, clientOptions)
 	if err != nil {
+		m.setMongoStatus(false)
 		return fmt.Errorf("failed to connect to MongoDB: %v", err)
 	}
 
@@ -355,58 +277,72 @@ func (m *APIKeyManager) connectMongo() error {
 	defer cancelPing()
 
 	if err = m.mongoClient.Ping(ctxPing, readpref.Primary()); err != nil {
+		m.setMongoStatus(false)
 		return fmt.Errorf("failed to ping MongoDB: %v", err)
 	}
 
 	m.apiKeysCollection = m.mongoClient.Database(m.config.DatabaseName).Collection(m.config.ApiKeysCollection)
 	m.logsCollection = m.mongoClient.Database(m.config.DatabaseName).Collection(m.config.LogsCollection)
 
-	m.logInfo("Connected to MongoDB", "component", "mongodb")
+	m.setMongoStatus(true)
+	log.Printf("✅ Successfully connected to MongoDB")
 	return nil
 }
 
-func (m *APIKeyManager) withRetry(operation func() error) error {
-	var lastErr error
-	for i := 0; i < m.config.MaxRetries; i++ {
-		err := m.circuitBreaker.Call(operation)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if i < m.config.MaxRetries-1 {
-			time.Sleep(time.Duration(m.config.RetryDelay) * time.Millisecond * time.Duration(i+1))
-		}
+func (m *APIKeyManager) setMongoStatus(connected bool) {
+	m.mongoMutex.Lock()
+	defer m.mongoMutex.Unlock()
+	m.mongoConnected = connected
+}
+
+func (m *APIKeyManager) isMongoConnected() bool {
+	m.mongoMutex.RLock()
+	defer m.mongoMutex.RUnlock()
+	return m.mongoConnected
+}
+
+func (m *APIKeyManager) ensureMongoConnection() error {
+	if !m.isMongoConnected() {
+		return m.connectMongo()
 	}
-	return lastErr
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := m.mongoClient.Ping(ctx, readpref.Primary()); err != nil {
+		m.setMongoStatus(false)
+		return m.connectMongo()
+	}
+
+	return nil
 }
 
 func (m *APIKeyManager) loadAPIKeysToCache() error {
-	return m.withRetry(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
+	if err := m.ensureMongoConnection(); err != nil {
+		return err
+	}
 
-		cursor, err := m.apiKeysCollection.Find(ctx, bson.M{})
-		if err != nil {
-			return err
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+
+	cursor, err := m.apiKeysCollection.Find(ctx, bson.M{})
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(ctx)
+
+	count := 0
+	for cursor.Next(ctx) {
+		var key APIKey
+		if err := cursor.Decode(&key); err != nil {
+			continue
 		}
-		defer cursor.Close(ctx)
+		m.cache.SetAPIKey(&key)
+		count++
+	}
 
-		count := 0
-		for cursor.Next(ctx) {
-			var key APIKey
-			if err := cursor.Decode(&key); err != nil {
-				continue
-			}
-			m.cache.SetAPIKey(&key)
-			if key.RPM > 0 {
-				m.rateLimiters.Store(key.ID, NewFixedWindowRateLimiter(key.RPM))
-			}
-			count++
-		}
-
-		m.logInfo("Loaded API keys to cache", "component", "cache", "count", count)
-		return cursor.Err()
-	})
+	log.Printf("Loaded %d API keys to cache", count)
+	return cursor.Err()
 }
 
 func generateRandomKey(length int) (string, error) {
@@ -478,7 +414,18 @@ func (m *APIKeyManager) toAPIKeyResponse(apiKey *APIKey) APIKeyResponse {
 	}
 }
 
-func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
+func (m *APIKeyManager) SaveAPIKey(apiKey *APIKey) error {
+	if err := m.ensureMongoConnection(); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+	
+	apiKey.UpdatedAt = time.Now().UTC()
+	_, err := m.apiKeysCollection.ReplaceOne(ctx, bson.M{"_id": apiKey.ID}, apiKey, options.Replace().SetUpsert(true))
+	return err
+}
 	expirationDuration, err := parseExpiration(req.Expiration)
 	if err != nil {
 		return nil, err
@@ -528,162 +475,26 @@ func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
 	}
 
 	m.cache.SetAPIKey(apiKey)
-	if req.RPM > 0 {
-		m.rateLimiters.Store(apiKey.ID, NewFixedWindowRateLimiter(req.RPM))
-	}
 
-	m.logInfo("API Key generated", "component", "apikey", "keyId", maskAPIKey(apiKey.ID), "name", apiKey.Name)
-	m.broadcastEvent(map[string]interface{}{
-		"type": "key_created",
-		"data": m.toAPIKeyResponse(apiKey),
+	m.logMessage("INFO", "API Key generated", "component", "apikey", "keyId", maskAPIKey(apiKey.ID), "name", apiKey.Name)
+	m.broadcastEvent(WSMessage{
+		Type: "key_created",
+		Data: m.toAPIKeyResponse(apiKey),
 	})
 
 	return apiKey, nil
 }
 
-func (m *APIKeyManager) SaveAPIKey(apiKey *APIKey) error {
-	return m.withRetry(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		apiKey.UpdatedAt = time.Now().UTC()
-		_, err := m.apiKeysCollection.ReplaceOne(ctx, bson.M{"_id": apiKey.ID}, apiKey, options.Replace().SetUpsert(true))
-		return err
-	})
-}
-
-func (m *APIKeyManager) authMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		token := c.GetHeader("Authorization")
-		if token == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
-			c.Abort()
-			return
-		}
-
-		if strings.HasPrefix(token, "Bearer ") {
-			token = token[7:]
-		}
-
-		claims := jwt.MapClaims{}
-		_, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			return []byte(m.config.JWTSecret), nil
-		})
-
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
-			c.Abort()
-			return
-		}
-
-		c.Next()
-	}
-}
-
-func (m *APIKeyManager) validationMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Header("X-Content-Type-Options", "nosniff")
-		c.Header("X-Frame-Options", "DENY")
-		c.Header("X-XSS-Protection", "1; mode=block")
-		c.Next()
-	}
-}
-
-func (m *APIKeyManager) loginHandler(c *gin.Context) {
-	var req LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
-		return
-	}
-
-	if req.Password != m.config.AdminPassword {
-		m.logWarn("Failed login attempt", "component", "auth", "ip", c.ClientIP())
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
-		return
-	}
-
-	expiresAt := time.Now().Add(24 * time.Hour)
-	claims := jwt.MapClaims{
-		"exp": expiresAt.Unix(),
-		"iat": time.Now().Unix(),
-		"sub": "admin",
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	tokenString, err := token.SignedString([]byte(m.config.JWTSecret))
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		return
-	}
-
-	m.logInfo("Successful login", "component", "auth", "ip", c.ClientIP())
-	c.JSON(http.StatusOK, TokenResponse{
-		Token:     tokenString,
-		ExpiresAt: expiresAt.Unix(),
-	})
-}
-
-func (m *APIKeyManager) healthHandler(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	mongoStatus := true
-	if err := m.mongoClient.Ping(ctx, readpref.Primary()); err != nil {
-		mongoStatus = false
-	}
-
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-
-	stats := SystemStats{
-		TotalKeys:    int64(len(m.cache.ListKeys())),
-		ActiveKeys:   m.getActiveKeysCount(),
-		ExpiredKeys:  m.getExpiredKeysCount(),
-		Uptime:       int64(time.Since(m.startTime).Seconds()),
-		MemoryUsage:  int64(memStats.Alloc),
-		GoRoutines:   runtime.NumGoroutine(),
-		MongoStatus:  mongoStatus,
-		CacheHitRate: m.cache.GetHitRate(),
-	}
-
-	status := http.StatusOK
-	if !mongoStatus {
-		status = http.StatusServiceUnavailable
-	}
-
-	c.JSON(status, gin.H{
-		"status": "ok",
-		"stats":  stats,
-	})
-}
-
-func (m *APIKeyManager) getActiveKeysCount() int64 {
-	var count int64
-	now := time.Now().UTC()
-	keys := m.cache.ListKeys()
-	for _, key := range keys {
-		if key.IsActive && key.Expiration.After(now) {
-			count++
-		}
-	}
-	return count
-}
-
-func (m *APIKeyManager) getExpiredKeysCount() int64 {
-	var count int64
-	now := time.Now().UTC()
-	keys := m.cache.ListKeys()
-	for _, key := range keys {
-		if key.Expiration.Before(now) {
-			count++
-		}
-	}
-	return count
-}
-
 func (m *APIKeyManager) createAPIKeyHandler(c *gin.Context) {
 	var req CreateKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		log.Printf("Invalid create key request from %s: %v", c.ClientIP(), err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data. Please check your input."})
+		return
+	}
+
+	if strings.TrimSpace(req.Name) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "API key name is required"})
 		return
 	}
 
@@ -702,77 +513,22 @@ func (m *APIKeyManager) createAPIKeyHandler(c *gin.Context) {
 		return
 	}
 
+	if req.TotalRequests <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Total requests must be greater than 0"})
+		return
+	}
+
 	apiKey, err := m.generateAPIKey(req)
 	if err != nil {
+		log.Printf("Failed to create API key for %s: %v", c.ClientIP(), err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
+	log.Printf("API key created successfully for %s", c.ClientIP())
 	c.JSON(http.StatusOK, gin.H{
-		"message": "API Key created successfully",
+		"message": "API key created successfully",
 		"data":    m.toAPIKeyResponse(apiKey),
-	})
-}
-
-func (m *APIKeyManager) listAPIKeysHandler(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
-	if page < 1 {
-		page = 1
-	}
-	if limit < 1 || limit > 100 {
-		limit = 50
-	}
-
-	filter := c.Query("filter")
-	search := c.Query("search")
-
-	keys := m.cache.ListKeys()
-	var filteredKeys []APIKey
-
-	now := time.Now().UTC()
-	for _, key := range keys {
-		if filter == "active" && (!key.IsActive || key.Expiration.Before(now)) {
-			continue
-		}
-		if filter == "expired" && key.Expiration.After(now) {
-			continue
-		}
-		if filter == "inactive" && key.IsActive {
-			continue
-		}
-		if search != "" && !strings.Contains(strings.ToLower(key.Name), strings.ToLower(search)) &&
-			!strings.Contains(strings.ToLower(key.ID), strings.ToLower(search)) {
-			continue
-		}
-		filteredKeys = append(filteredKeys, key)
-	}
-
-	total := len(filteredKeys)
-	start := (page - 1) * limit
-	end := start + limit
-	if start >= total {
-		filteredKeys = []APIKey{}
-	} else {
-		if end > total {
-			end = total
-		}
-		filteredKeys = filteredKeys[start:end]
-	}
-
-	var response []APIKeyResponse
-	for _, key := range filteredKeys {
-		response = append(response, m.toAPIKeyResponse(&key))
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"data": response,
-		"pagination": gin.H{
-			"page":       page,
-			"limit":      limit,
-			"total":      total,
-			"totalPages": (total + limit - 1) / limit,
-		},
 	})
 }
 
@@ -801,7 +557,7 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 
 	var req UpdateKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request data"})
 		return
 	}
 
@@ -811,10 +567,12 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		return
 	}
 
-	original := *apiKey
-
 	if req.Name != nil {
-		apiKey.Name = *req.Name
+		if strings.TrimSpace(*req.Name) == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "API key name cannot be empty"})
+			return
+		}
+		apiKey.Name = strings.TrimSpace(*req.Name)
 	}
 	if req.RPM != nil {
 		if *req.RPM < 0 || *req.RPM > 10000 {
@@ -831,6 +589,10 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		apiKey.ThreadsLimit = *req.ThreadsLimit
 	}
 	if req.TotalRequests != nil {
+		if *req.TotalRequests <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Total requests must be greater than 0"})
+			return
+		}
 		apiKey.TotalRequests = *req.TotalRequests
 	}
 	if req.IsActive != nil {
@@ -839,37 +601,28 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 	if req.Expiration != nil {
 		expirationDuration, err := parseExpiration(*req.Expiration)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid expiration format"})
 			return
 		}
-		if apiKey.Expiration.Before(time.Now().UTC()) {
-			apiKey.Expiration = time.Now().UTC().Add(expirationDuration)
-		} else {
-			apiKey.Expiration = apiKey.Expiration.Add(expirationDuration)
-		}
+		apiKey.Expiration = time.Now().UTC().Add(expirationDuration)
 	}
 
 	if err := m.SaveAPIKey(apiKey); err != nil {
+		log.Printf("Failed to update API key %s: %v", keyID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update API key"})
 		return
 	}
 
 	m.cache.SetAPIKey(apiKey)
-	if apiKey.RPM > 0 {
-		m.rateLimiters.Store(apiKey.ID, NewFixedWindowRateLimiter(apiKey.RPM))
-	} else {
-		m.rateLimiters.Delete(apiKey.ID)
-	}
 
-	m.logInfo("API Key updated", "component", "apikey", "keyId", maskAPIKey(apiKey.ID), "name", apiKey.Name)
-	m.broadcastEvent(map[string]interface{}{
-		"type":    "key_updated",
-		"data":    m.toAPIKeyResponse(apiKey),
-		"changes": m.getChanges(&original, apiKey),
+	m.logMessage("INFO", "API Key updated", "component", "apikey", "keyId", maskAPIKey(apiKey.ID), "name", apiKey.Name)
+	m.broadcastEvent(WSMessage{
+		Type: "key_updated",
+		Data: m.toAPIKeyResponse(apiKey),
 	})
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "API Key updated successfully",
+		"message": "API key updated successfully",
 		"data":    m.toAPIKeyResponse(apiKey),
 	})
 }
@@ -888,24 +641,24 @@ func (m *APIKeyManager) deleteAPIKeyHandler(c *gin.Context) {
 	}
 
 	err := m.withRetry(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 		defer cancel()
 		_, err := m.apiKeysCollection.DeleteOne(ctx, bson.M{"_id": keyID})
 		return err
 	})
 
 	if err != nil {
+		log.Printf("Failed to delete API key %s: %v", keyID, err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete API key"})
 		return
 	}
 
 	m.cache.DeleteAPIKey(keyID)
-	m.rateLimiters.Delete(keyID)
 
-	m.logInfo("API Key deleted", "component", "apikey", "keyId", maskAPIKey(keyID))
-	m.broadcastEvent(map[string]interface{}{
-		"type": "key_deleted",
-		"data": gin.H{"id": keyID},
+	m.logMessage("INFO", "API Key deleted", "component", "apikey", "keyId", maskAPIKey(keyID))
+	m.broadcastEvent(WSMessage{
+		Type: "key_deleted",
+		Data: gin.H{"id": keyID},
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "API key deleted successfully"})
@@ -913,19 +666,21 @@ func (m *APIKeyManager) deleteAPIKeyHandler(c *gin.Context) {
 
 func (m *APIKeyManager) cleanExpiredKeysHandler(c *gin.Context) {
 	now := time.Now().UTC()
+	var deletedCount int64
 
-	var expiredKeys []string
 	err := m.withRetry(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
 		defer cancel()
 
 		filter := bson.M{"expiration": bson.M{"$lt": now}}
+		
 		cursor, err := m.apiKeysCollection.Find(ctx, filter)
 		if err != nil {
 			return err
 		}
 		defer cursor.Close(ctx)
 
+		var expiredKeys []string
 		for cursor.Next(ctx) {
 			var result struct {
 				ID string `bson:"_id"`
@@ -944,25 +699,247 @@ func (m *APIKeyManager) cleanExpiredKeysHandler(c *gin.Context) {
 		if err != nil {
 			return err
 		}
+		deletedCount = res.DeletedCount
 
 		for _, keyID := range expiredKeys {
 			m.cache.DeleteAPIKey(keyID)
-			m.rateLimiters.Delete(keyID)
 		}
 
-		m.logInfo("Cleaned expired API keys", "component", "cleanup", "count", res.DeletedCount)
 		return nil
 	})
 
 	if err != nil {
+		log.Printf("Failed to clean expired keys: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to clean expired keys"})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Expired keys cleaned successfully"})
+	m.logMessage("INFO", "Cleaned expired API keys", "component", "cleanup", "count", deletedCount)
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("Successfully cleaned %d expired API keys", deletedCount),
+		"count":   deletedCount,
+	})
+}
+
+func (m *APIKeyManager) withRetry(operation func() error) error {
+	var lastErr error
+	for i := 0; i < m.config.MaxRetries; i++ {
+		err := operation()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if i < m.config.MaxRetries-1 {
+			select {
+			case <-time.After(time.Duration(m.config.RetryDelay) * time.Millisecond * time.Duration(i+1)):
+			case <-m.ctx.Done():
+				return m.ctx.Err()
+			}
+		}
+	}
+	return lastErr
+}
+	if err := m.ensureMongoConnection(); err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
+	
+	apiKey.UpdatedAt = time.Now().UTC()
+	_, err := m.apiKeysCollection.ReplaceOne(ctx, bson.M{"_id": apiKey.ID}, apiKey, options.Replace().SetUpsert(true))
+	return err
+}
+
+func (m *APIKeyManager) corsMiddleware() gin.HandlerFunc {
+	config := cors.DefaultConfig()
+	config.AllowAllOrigins = true
+	config.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}
+	config.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-Requested-With"}
+	config.ExposeHeaders = []string{"Content-Length"}
+	config.AllowCredentials = true
+	return cors.New(config)
+}
+
+func (m *APIKeyManager) authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusOK)
+			return
+		}
+
+		token := c.GetHeader("Authorization")
+		if token == "" {
+			log.Printf("Missing Authorization header from %s", c.ClientIP())
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
+			c.Abort()
+			return
+		}
+
+		if strings.HasPrefix(token, "Bearer ") {
+			token = token[7:]
+		}
+
+		claims := jwt.MapClaims{}
+		parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(m.config.JWTSecret), nil
+		})
+
+		if err != nil || !parsedToken.Valid {
+			log.Printf("Invalid token from %s: %v", c.ClientIP(), err)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+			c.Abort()
+			return
+		}
+
+		c.Set("claims", claims)
+		c.Next()
+	}
+}
+
+func (m *APIKeyManager) loginHandler(c *gin.Context) {
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("Invalid login request format from %s: %v", c.ClientIP(), err)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request format"})
+		return
+	}
+
+	log.Printf("Login attempt from %s", c.ClientIP())
+
+	if req.Password != m.config.AdminPassword {
+		log.Printf("Failed login attempt from %s", c.ClientIP())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
+		return
+	}
+
+	expiresAt := time.Now().Add(24 * time.Hour)
+	claims := jwt.MapClaims{
+		"exp": expiresAt.Unix(),
+		"iat": time.Now().Unix(),
+		"sub": "admin",
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	tokenString, err := token.SignedString([]byte(m.config.JWTSecret))
+	if err != nil {
+		log.Printf("Failed to generate token: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate authentication token"})
+		return
+	}
+
+	log.Printf("Successful login from %s", c.ClientIP())
+	c.JSON(http.StatusOK, TokenResponse{
+		Token:     tokenString,
+		ExpiresAt: expiresAt.Unix(),
+	})
+}
+
+func (m *APIKeyManager) healthHandler(c *gin.Context) {
+	mongoStatus := m.isMongoConnected()
+	if mongoStatus {
+		ctx, cancel := context.WithTimeout(m.ctx, 2*time.Second)
+		defer cancel()
+		if err := m.mongoClient.Ping(ctx, readpref.Primary()); err != nil {
+			mongoStatus = false
+			m.setMongoStatus(false)
+		}
+	}
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	keys := m.cache.ListKeys()
+	activeKeys := int64(0)
+	expiredKeys := int64(0)
+	now := time.Now().UTC()
+
+	for _, key := range keys {
+		if key.IsActive && key.Expiration.After(now) {
+			activeKeys++
+		} else if key.Expiration.Before(now) {
+			expiredKeys++
+		}
+	}
+
+	stats := SystemStats{
+		TotalKeys:    int64(len(keys)),
+		ActiveKeys:   activeKeys,
+		ExpiredKeys:  expiredKeys,
+		Uptime:       int64(time.Since(m.startTime).Seconds()),
+		MemoryUsage:  int64(memStats.Alloc),
+		GoRoutines:   runtime.NumGoroutine(),
+		MongoStatus:  mongoStatus,
+		CacheHitRate: m.cache.GetHitRate(),
+	}
+
+	status := "healthy"
+	httpStatus := http.StatusOK
+	if !mongoStatus {
+		status = "degraded"
+		httpStatus = http.StatusServiceUnavailable
+	}
+
+	c.JSON(httpStatus, gin.H{
+		"status": status,
+		"stats":  stats,
+	})
+}
+
+func (m *APIKeyManager) listAPIKeysHandler(c *gin.Context) {
+	log.Printf("API Keys request from %s", c.ClientIP())
+
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
+	if page < 1 {
+		page = 1
+	}
+	if limit < 1 || limit > 100 {
+		limit = 50
+	}
+
+	keys := m.cache.ListKeys()
+	var response []APIKeyResponse
+	for _, key := range keys {
+		response = append(response, m.toAPIKeyResponse(&key))
+	}
+
+	total := len(response)
+	start := (page - 1) * limit
+	end := start + limit
+	if start >= total {
+		response = []APIKeyResponse{}
+	} else {
+		if end > total {
+			end = total
+		}
+		response = response[start:end]
+	}
+
+	log.Printf("Returning %d API keys to %s", len(response), c.ClientIP())
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": response,
+		"pagination": gin.H{
+			"page":       page,
+			"limit":      limit,
+			"total":      total,
+			"totalPages": (total + limit - 1) / limit,
+		},
+	})
 }
 
 func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
+	log.Printf("Logs request from %s", c.ClientIP())
+
+	if !m.isMongoConnected() {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Database connection unavailable"})
+		return
+	}
+
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
 	if page < 1 {
@@ -972,82 +949,127 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 		limit = 100
 	}
 
-	level := c.Query("level")
-	component := c.Query("component")
-	search := c.Query("search")
-
 	filter := bson.M{}
-	if level != "" {
-		filter["level"] = level
-	}
-	if component != "" {
-		filter["component"] = component
-	}
-	if search != "" {
-		filter["message"] = bson.M{"$regex": search, "$options": "i"}
-	}
+	
+	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
+	defer cancel()
 
-	err := m.withRetry(func() error {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		totalCount, err := m.logsCollection.CountDocuments(ctx, filter)
-		if err != nil {
-			return err
-		}
-
-		opts := options.Find().
-			SetSort(bson.D{{Key: "timestamp", Value: -1}}).
-			SetSkip(int64((page - 1) * limit)).
-			SetLimit(int64(limit))
-
-		cursor, err := m.logsCollection.Find(ctx, filter, opts)
-		if err != nil {
-			return err
-		}
-		defer cursor.Close(ctx)
-
-		var logs []LogEntry
-		if err := cursor.All(ctx, &logs); err != nil {
-			return err
-		}
-
-		c.JSON(http.StatusOK, gin.H{
-			"data": logs,
-			"pagination": gin.H{
-				"page":       page,
-				"limit":      limit,
-				"total":      totalCount,
-				"totalPages": (totalCount + int64(limit) - 1) / int64(limit),
-			},
-		})
-		return nil
-	})
-
+	totalCount, err := m.logsCollection.CountDocuments(ctx, filter)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve logs"})
+		log.Printf("Error counting logs: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count logs"})
+		return
 	}
+
+	opts := options.Find().
+		SetSort(bson.D{{Key: "timestamp", Value: -1}}).
+		SetSkip(int64((page - 1) * limit)).
+		SetLimit(int64(limit))
+
+	cursor, err := m.logsCollection.Find(ctx, filter, opts)
+	if err != nil {
+		log.Printf("Error finding logs: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve logs"})
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var logs []LogEntry
+	if err := cursor.All(ctx, &logs); err != nil {
+		log.Printf("Error decoding logs: %v", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decode logs"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"data": logs,
+		"pagination": gin.H{
+			"page":       page,
+			"limit":      limit,
+			"total":      totalCount,
+			"totalPages": (totalCount + int64(limit) - 1) / int64(limit),
+		},
+	})
 }
 
 func (m *APIKeyManager) wsHandler(c *gin.Context) {
-	conn, err := m.upgrader.Upgrade(c.Writer, c.Request, nil)
-	if err != nil {
-		m.logError("WebSocket upgrade failed", err, "component", "websocket")
+	log.Printf("WebSocket connection attempt from %s", c.ClientIP())
+
+	// Check for token in query parameter for WebSocket connections
+	token := c.Query("token")
+	if token == "" {
+		log.Printf("Missing token in WebSocket query from %s", c.ClientIP())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token required for WebSocket connection"})
 		return
 	}
-	defer conn.Close()
+
+	// Validate the token
+	claims := jwt.MapClaims{}
+	parsedToken, err := jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(m.config.JWTSecret), nil
+	})
+
+	if err != nil || !parsedToken.Valid {
+		log.Printf("Invalid WebSocket token from %s: %v", c.ClientIP(), err)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
+		return
+	}
+
+	conn, err := m.upgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("WebSocket upgrade failed for %s: %v", c.ClientIP(), err)
+		return
+	}
 
 	clientID := generateClientID()
 	m.wsClients.Store(clientID, conn)
-	defer m.wsClients.Delete(clientID)
+	
+	log.Printf("WebSocket client %s connected from %s", clientID, c.ClientIP())
 
-	m.logInfo("WebSocket client connected", "component", "websocket", "clientId", clientID)
+	go func() {
+		defer func() {
+			m.wsClients.Delete(clientID)
+			conn.Close()
+			log.Printf("WebSocket client %s disconnected", clientID)
+		}()
+
+		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		conn.SetPongHandler(func(string) error {
+			conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+			return nil
+		})
+
+		for {
+			select {
+			case <-m.ctx.Done():
+				return
+			default:
+				_, _, err := conn.ReadMessage()
+				if err != nil {
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+						log.Printf("WebSocket unexpected close error: %v", err)
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
 
 	for {
-		_, _, err := conn.ReadMessage()
-		if err != nil {
-			m.logInfo("WebSocket client disconnected", "component", "websocket", "clientId", clientID)
-			break
+		select {
+		case <-ticker.C:
+			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				log.Printf("Failed to send ping to client %s: %v", clientID, err)
+				return
+			}
+		case <-m.ctx.Done():
+			return
 		}
 	}
 }
@@ -1057,74 +1079,50 @@ func generateClientID() string {
 	return id
 }
 
-func (m *APIKeyManager) broadcastEvent(event interface{}) {
+func (m *APIKeyManager) broadcastEvent(event WSMessage) {
 	select {
 	case m.eventChan <- event:
 	default:
+		log.Printf("Event channel full, dropping event")
 	}
 }
 
 func (m *APIKeyManager) eventBroadcaster() {
-	m.wg.Add(1)
 	go func() {
-		defer m.wg.Done()
+		log.Printf("Event broadcaster started")
 		for {
 			select {
 			case event := <-m.eventChan:
+				clientCount := 0
 				m.wsClients.Range(func(key, value interface{}) bool {
 					if conn, ok := value.(*websocket.Conn); ok {
+						conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 						if err := conn.WriteJSON(event); err != nil {
+							log.Printf("Failed to send event to client %v: %v", key, err)
 							m.wsClients.Delete(key)
+						} else {
+							clientCount++
 						}
 					}
 					return true
 				})
-			case <-m.stopChan:
+				if clientCount > 0 {
+					log.Printf("Broadcasted event to %d clients", clientCount)
+				}
+			case <-m.ctx.Done():
+				log.Printf("Event broadcaster stopping")
 				return
 			}
 		}
 	}()
 }
 
-func (m *APIKeyManager) getChanges(original, updated *APIKey) []string {
-	var changes []string
-	if original.Name != updated.Name {
-		changes = append(changes, fmt.Sprintf("Name: %s -> %s", original.Name, updated.Name))
-	}
-	if !original.Expiration.Equal(updated.Expiration) {
-		changes = append(changes, fmt.Sprintf("Expiration: %s -> %s",
-			original.Expiration.Format(time.RFC3339), updated.Expiration.Format(time.RFC3339)))
-	}
-	if original.RPM != updated.RPM {
-		changes = append(changes, fmt.Sprintf("RPM: %d -> %d", original.RPM, updated.RPM))
-	}
-	if original.ThreadsLimit != updated.ThreadsLimit {
-		changes = append(changes, fmt.Sprintf("ThreadsLimit: %d -> %d", original.ThreadsLimit, updated.ThreadsLimit))
-	}
-	if original.TotalRequests != updated.TotalRequests {
-		changes = append(changes, fmt.Sprintf("TotalRequests: %d -> %d", original.TotalRequests, updated.TotalRequests))
-	}
-	if original.IsActive != updated.IsActive {
-		changes = append(changes, fmt.Sprintf("IsActive: %t -> %t", original.IsActive, updated.IsActive))
-	}
-	return changes
-}
-
-func (m *APIKeyManager) logInfo(message string, args ...interface{}) {
-	m.logMessage("INFO", message, args...)
-}
-
-func (m *APIKeyManager) logWarn(message string, args ...interface{}) {
-	m.logMessage("WARN", message, args...)
-}
-
-func (m *APIKeyManager) logError(message string, err error, args ...interface{}) {
-	allArgs := append(args, "error", err.Error())
-	m.logMessage("ERROR", message, allArgs...)
-}
-
 func (m *APIKeyManager) logMessage(level, message string, args ...interface{}) {
 	log.Printf("[%s] %s", level, message)
+
+	if !m.isMongoConnected() {
+		return
+	}
 
 	metadata := bson.M{}
 	for i := 0; i < len(args); i += 2 {
@@ -1151,97 +1149,49 @@ func (m *APIKeyManager) logMessage(level, message string, args ...interface{}) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		m.logsCollection.InsertOne(ctx, logEntry)
-	}()
-}
-
-func (m *APIKeyManager) watchMongoChanges() {
-	m.wg.Add(1)
-	go func() {
-		defer m.wg.Done()
-		for {
-			select {
-			case <-m.stopChan:
-				return
-			default:
-				m.connectAndWatchChanges()
-				time.Sleep(5 * time.Second)
-			}
-		}
-	}()
-}
-
-func (m *APIKeyManager) connectAndWatchChanges() {
-	ctx := context.Background()
-	pipeline := mongo.Pipeline{}
-	changeStreamOptions := options.ChangeStream().SetFullDocument(options.UpdateLookup)
-
-	cs, err := m.apiKeysCollection.Watch(ctx, pipeline, changeStreamOptions)
-	if err != nil {
-		m.logError("Error watching MongoDB changes", err, "component", "mongodb")
-		return
-	}
-	defer cs.Close(ctx)
-
-	for {
-		select {
-		case <-m.stopChan:
+		
+		if _, err := m.logsCollection.InsertOne(ctx, logEntry); err != nil {
+			log.Printf("Failed to insert log entry: %v", err)
 			return
-		default:
-			if cs.Next(ctx) {
-				var event struct {
-					OperationType string `bson:"operationType"`
-					FullDocument  APIKey `bson:"fullDocument"`
-					DocumentKey   struct {
-						ID string `bson:"_id"`
-					} `bson:"documentKey"`
-				}
-				if err := cs.Decode(&event); err != nil {
-					m.logError("Error decoding change stream document", err, "component", "mongodb")
-					continue
-				}
-
-				keyID := event.DocumentKey.ID
-
-				switch event.OperationType {
-				case "insert", "replace", "update":
-					fullDoc := event.FullDocument
-					m.cache.SetAPIKey(&fullDoc)
-					if fullDoc.RPM > 0 {
-						m.rateLimiters.Store(fullDoc.ID, NewFixedWindowRateLimiter(fullDoc.RPM))
-					} else {
-						m.rateLimiters.Delete(fullDoc.ID)
-					}
-					m.logInfo("Cache updated for API key", "component", "cache", "keyId", maskAPIKey(keyID))
-				case "delete":
-					m.cache.DeleteAPIKey(keyID)
-					m.rateLimiters.Delete(keyID)
-					m.logInfo("API key deleted from cache", "component", "cache", "keyId", maskAPIKey(keyID))
-				}
-			} else if err := cs.Err(); err != nil {
-				m.logError("Error reading change stream", err, "component", "mongodb")
-				return
-			}
 		}
-	}
+		
+		m.broadcastEvent(WSMessage{
+			Type: "log_entry",
+			Data: logEntry,
+		})
+	}()
 }
 
-func (m *APIKeyManager) shutdown(server *http.Server) {
-	close(m.stopChan)
-	m.wg.Wait()
-
-	if m.mongoClient != nil {
-		m.mongoClient.Disconnect(context.Background())
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	server.Shutdown(ctx)
-
-	m.logInfo("APIKeyManager shutdown complete", "component", "system")
+func (m *APIKeyManager) shutdown() {
+	m.shutdownOnce.Do(func() {
+		log.Printf("Starting graceful shutdown...")
+		
+		m.cancel()
+		
+		m.wsClients.Range(func(key, value interface{}) bool {
+			if conn, ok := value.(*websocket.Conn); ok {
+				conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "Server shutting down"))
+				conn.Close()
+			}
+			m.wsClients.Delete(key)
+			return true
+		})
+		
+		close(m.eventChan)
+		
+		if m.mongoClient != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			m.mongoClient.Disconnect(ctx)
+		}
+		
+		log.Printf("✅ Shutdown complete")
+	})
 }
 
 func main() {
+	log.Printf("🚀 Starting API Key Manager Server...")
+	
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	gin.SetMode(gin.ReleaseMode)
 
@@ -1250,43 +1200,36 @@ func main() {
 		log.Fatalf("Error loading config: %v", err)
 	}
 
+	log.Printf("Configuration loaded: Port=%s, DB=%s", config.ServerPort, config.DatabaseName)
+
 	manager := NewAPIKeyManager(config)
 
-	manager.wg.Add(1)
-	go func() {
-		defer manager.wg.Done()
-		manager.watchConfigAndReload("server.json")
-	}()
-
 	if err := manager.connectMongo(); err != nil {
-		log.Fatalf("Error connecting to MongoDB: %v", err)
+		log.Printf("⚠️  MongoDB connection failed: %v", err)
+		log.Printf("Server will start but database features will be limited")
 	}
 
 	if err := manager.loadAPIKeysToCache(); err != nil {
-		manager.logError("Error loading API keys to cache", err, "component", "startup")
+		log.Printf("⚠️  Failed to load API keys to cache: %v", err)
 	}
 
-	manager.watchMongoChanges()
 	manager.eventBroadcaster()
 
 	router := gin.New()
+	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
-	router.Use(manager.validationMiddleware())
-
-	corsConfig := cors.DefaultConfig()
-	corsConfig.AllowAllOrigins = true
-	corsConfig.AllowHeaders = []string{"Origin", "Content-Length", "Content-Type", "Authorization"}
-	router.Use(cors.New(corsConfig))
+	router.Use(manager.corsMiddleware())
 
 	staticFS, err := static.EmbedFolder(staticFiles, "frontend/dist")
 	if err != nil {
-		log.Printf("Error creating static file system: %v", err)
+		log.Printf("⚠️  Error creating static file system: %v", err)
 	} else {
 		router.Use(static.Serve("/", staticFS))
 	}
 
 	router.POST("/api/v1/auth/login", manager.loginHandler)
 	router.GET("/api/v1/health", manager.healthHandler)
+	router.GET("/api/v1/ws", manager.wsHandler)
 
 	api := router.Group("/api/v1")
 	api.Use(manager.authMiddleware())
@@ -1298,7 +1241,6 @@ func main() {
 		api.DELETE("/keys/:id", manager.deleteAPIKeyHandler)
 		api.POST("/keys/clean", manager.cleanExpiredKeysHandler)
 		api.GET("/logs", manager.getLogsHandler)
-		api.GET("/ws", manager.wsHandler)
 	}
 
 	router.NoRoute(func(c *gin.Context) {
@@ -1315,28 +1257,37 @@ func main() {
 	})
 
 	server := &http.Server{
-		Addr:         ":" + manager.config.ServerPort,
+		Addr:         ":" + config.ServerPort,
 		Handler:      router,
-		ReadTimeout:  time.Duration(manager.config.ReadTimeout) * time.Second,
-		WriteTimeout: time.Duration(manager.config.WriteTimeout) * time.Second,
-		IdleTimeout:  time.Duration(manager.config.IdleTimeout) * time.Second,
+		ReadTimeout:  time.Duration(config.ReadTimeout) * time.Second,
+		WriteTimeout: time.Duration(config.WriteTimeout) * time.Second,
+		IdleTimeout:  time.Duration(config.IdleTimeout) * time.Second,
 	}
 
 	go func() {
-		log.Printf("Server starting on port %s...", manager.config.ServerPort)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}
 	}()
 
-	log.Printf("✅ Server is ready and listening on http://localhost:%s", manager.config.ServerPort)
-	log.Printf("📊 Health check: http://localhost:%s/api/v1/health", manager.config.ServerPort)
+	log.Printf("✅ Server is ready and listening on http://localhost:%s", config.ServerPort)
+	log.Printf("📊 Health check: http://localhost:%s/api/v1/health", config.ServerPort)
 	log.Printf("🔐 Admin login required for management interface")
 
-	stop := make(chan os.Signal, 1)
-	signal.Notify(stop, os.Interrupt)
-	<-stop
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
 
-	manager.logInfo("Shutting down server", "component", "server")
-	manager.shutdown(server)
+	log.Println("🛑 Shutting down server...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	manager.shutdown()
+
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
+	}
+
+	log.Println("✅ Server exited gracefully")
 }

@@ -18,7 +18,8 @@ import {
   Eye,
   EyeOff,
   Plus,
-  X
+  X,
+  Clock
 } from 'lucide-react';
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
@@ -48,13 +49,12 @@ const ManageKeys: React.FC = () => {
   const [actionMenuKey, setActionMenuKey] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10);
+  const [copyStates, setCopyStates] = useState<{[key: string]: boolean}>({});
 
-  // Load keys on component mount
   useEffect(() => {
     fetchKeys();
   }, []);
 
-  // Filter keys when dependencies change
   useEffect(() => {
     filterKeys();
   }, [apiKeys, searchTerm, filterStatus]);
@@ -66,8 +66,12 @@ const ManageKeys: React.FC = () => {
       
       const response = await apiService.getKeys({ limit: 1000 }, useCache);
       setApiKeys(response.data);
+      
+      if (response.data.length === 0 && !useCache) {
+        toast.info('No API keys found. Create your first key to get started.');
+      }
     } catch (error: any) {
-      const errorMessage = error.response?.data?.error || 'Failed to fetch API keys';
+      const errorMessage = error.message || 'Unable to load API keys. Please try again.';
       setKeysError(errorMessage);
       toast.error(errorMessage);
     } finally {
@@ -76,12 +80,14 @@ const ManageKeys: React.FC = () => {
   }, [setApiKeys, setKeysLoading, setKeysError]);
 
   const filterKeys = useCallback(() => {
-    let filtered = apiKeys;
+    let filtered = [...apiKeys];
     
     if (searchTerm) {
+      const searchLower = searchTerm.toLowerCase();
       filtered = filtered.filter(key =>
-        key.name?.toLowerCase().includes(searchTerm.toLowerCase()) ||
-        key.id.toLowerCase().includes(searchTerm.toLowerCase())
+        (key.name?.toLowerCase().includes(searchLower)) ||
+        key.id.toLowerCase().includes(searchLower) ||
+        key.maskedKey?.toLowerCase().includes(searchLower)
       );
     }
 
@@ -127,12 +133,16 @@ const ManageKeys: React.FC = () => {
     }
   };
 
-  const copyToClipboard = async (text: string) => {
+  const copyToClipboard = async (text: string, keyId: string) => {
     try {
       await navigator.clipboard.writeText(text);
-      toast.success('Copied to clipboard!');
+      setCopyStates(prev => ({ ...prev, [keyId]: true }));
+      toast.success('API key copied to clipboard!');
+      setTimeout(() => {
+        setCopyStates(prev => ({ ...prev, [keyId]: false }));
+      }, 2000);
     } catch {
-      toast.error('Failed to copy to clipboard');
+      toast.error('Failed to copy to clipboard. Please try selecting and copying manually.');
     }
   };
 
@@ -142,17 +152,19 @@ const ManageKeys: React.FC = () => {
     setActionMenuKey(null);
   };
 
-  const handleDelete = async (keyId: string) => {
-    if (!confirm('Are you sure you want to delete this API key? This action cannot be undone.')) {
+  const handleDelete = async (keyId: string, keyName?: string) => {
+    const displayName = keyName || 'this API key';
+    if (!confirm(`Are you sure you want to delete "${displayName}"? This action cannot be undone.`)) {
       return;
     }
 
     try {
       await apiService.deleteKey(keyId);
       removeApiKey(keyId);
-      toast.success('API key deleted successfully');
+      toast.success(`API key "${displayName}" deleted successfully`);
     } catch (error: any) {
-      toast.error(error.response?.data?.error || 'Failed to delete API key');
+      const errorMessage = error.message || 'Failed to delete API key. Please try again.';
+      toast.error(errorMessage);
     }
     setActionMenuKey(null);
   };
@@ -160,31 +172,67 @@ const ManageKeys: React.FC = () => {
   const handleBulkDelete = async () => {
     if (selectedKeys.size === 0) return;
     
-    if (!confirm(`Are you sure you want to delete ${selectedKeys.size} API key(s)? This action cannot be undone.`)) {
+    const keyCount = selectedKeys.size;
+    if (!confirm(`Are you sure you want to delete ${keyCount} API key(s)? This action cannot be undone.`)) {
       return;
     }
 
+    const successKeys: string[] = [];
+    const failedKeys: string[] = [];
+
     try {
-      await Promise.all(Array.from(selectedKeys).map(keyId => apiService.deleteKey(keyId)));
-      Array.from(selectedKeys).forEach(keyId => removeApiKey(keyId));
+      await Promise.allSettled(
+        Array.from(selectedKeys).map(async (keyId) => {
+          try {
+            await apiService.deleteKey(keyId);
+            removeApiKey(keyId);
+            successKeys.push(keyId);
+          } catch (error) {
+            failedKeys.push(keyId);
+          }
+        })
+      );
+
       setSelectedKeys(new Set());
-      toast.success(`${selectedKeys.size} API key(s) deleted successfully`);
-    } catch (error: any) {
-      toast.error('Failed to delete some API keys');
+
+      if (successKeys.length > 0) {
+        toast.success(`Successfully deleted ${successKeys.length} API key(s)`);
+      }
+      if (failedKeys.length > 0) {
+        toast.error(`Failed to delete ${failedKeys.length} API key(s)`);
+      }
+    } catch (error) {
+      toast.error('Bulk delete operation failed. Please try again.');
     }
   };
 
   const handleCleanExpired = async () => {
+    const expiredCount = getExpiredKeysCount();
+    if (expiredCount === 0) {
+      toast.info('No expired keys found to clean up.');
+      return;
+    }
+
+    if (!confirm(`This will permanently delete ${expiredCount} expired API key(s). Continue?`)) {
+      return;
+    }
+
     try {
-      await apiService.cleanExpiredKeys();
-      toast.success('Expired keys cleaned successfully');
-      fetchKeys(false); // Force refresh
+      const response = await apiService.cleanExpiredKeys();
+      toast.success(response.message || 'Expired keys cleaned successfully');
+      fetchKeys(false);
     } catch (error: any) {
-      toast.error(error.response?.data?.error || 'Failed to clean expired keys');
+      const errorMessage = error.message || 'Failed to clean expired keys. Please try again.';
+      toast.error(errorMessage);
     }
   };
 
   const exportKeys = () => {
+    if (filteredKeys.length === 0) {
+      toast.error('No API keys to export');
+      return;
+    }
+
     const exportData = filteredKeys.map(key => ({
       name: key.name,
       maskedKey: key.maskedKey,
@@ -194,19 +242,20 @@ const ManageKeys: React.FC = () => {
       totalRequests: key.totalRequests,
       usageCount: key.usageCount,
       isActive: key.isActive,
-      createdAt: key.createdAt
+      createdAt: key.createdAt,
+      status: getKeyStatus(key)
     }));
 
     const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `api-keys-${format(new Date(), 'yyyy-MM-dd')}.json`;
+    a.download = `api-keys-export-${format(new Date(), 'yyyy-MM-dd-HHmm')}.json`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast.success('API keys exported successfully');
+    toast.success(`Exported ${filteredKeys.length} API keys`);
   };
 
   const toggleKeySelection = (keyId: string) => {
@@ -220,42 +269,56 @@ const ManageKeys: React.FC = () => {
   };
 
   const selectAll = () => {
-    if (selectedKeys.size === paginatedKeys.length) {
+    if (selectedKeys.size === paginatedKeys.length && paginatedKeys.length > 0) {
       setSelectedKeys(new Set());
     } else {
       setSelectedKeys(new Set(paginatedKeys.map(key => key.id)));
     }
   };
 
-  // Pagination
+  const getActiveKeysCount = () => {
+    const now = new Date();
+    return apiKeys.filter(key => key.isActive && new Date(key.expiration) > now).length;
+  };
+
+  const getExpiredKeysCount = () => {
+    const now = new Date();
+    return apiKeys.filter(key => new Date(key.expiration) <= now).length;
+  };
+
+  const calculateUsagePercentage = (used: number, total: number) => {
+    return Math.min((used / total) * 100, 100);
+  };
+
   const totalPages = Math.ceil(filteredKeys.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const paginatedKeys = filteredKeys.slice(startIndex, startIndex + itemsPerPage);
 
-  // Loading State
   if (keysLoading && apiKeys.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
         <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-        <p className="text-gray-600 dark:text-gray-400">Loading API keys...</p>
+        <p className="text-gray-600 dark:text-gray-400">Loading your API keys...</p>
       </div>
     );
   }
 
-  // Error State
   if (keysError && apiKeys.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <div className="p-4 bg-red-100 dark:bg-red-900/20 rounded-lg">
+        <div className="p-4 bg-red-100 dark:bg-red-900/20 rounded-lg text-center">
           <AlertCircle className="w-8 h-8 text-red-600 dark:text-red-400 mx-auto mb-2" />
-          <p className="text-red-800 dark:text-red-400 text-center">{keysError}</p>
+          <p className="text-red-800 dark:text-red-400 font-medium">Unable to Load API Keys</p>
+          <p className="text-red-600 dark:text-red-500 text-sm mt-1">{keysError}</p>
         </div>
         <motion.button
           whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
           onClick={() => fetchKeys(false)}
-          className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+          className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2"
         >
-          Try Again
+          <RefreshCw className="w-4 h-4" />
+          <span>Try Again</span>
         </motion.button>
       </div>
     );
@@ -263,33 +326,32 @@ const ManageKeys: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-        <div className="flex-1 flex items-center space-x-4">
+        <div className="flex-1 flex flex-col sm:flex-row items-stretch sm:items-center space-y-3 sm:space-y-0 sm:space-x-4">
           <div className="relative flex-1 max-w-md">
             <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
             <input
               type="text"
-              placeholder="Search keys..."
+              placeholder="Search by name, key, or masked key..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 focus:ring-0 transition-colors"
+              className="w-full pl-10 pr-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 focus:ring-0 transition-colors text-sm"
             />
           </div>
 
           <select
             value={filterStatus}
             onChange={(e) => setFilterStatus(e.target.value)}
-            className="px-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 transition-colors"
+            className="px-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 transition-colors text-sm min-w-[140px]"
           >
-            <option value="all">All Keys</option>
-            <option value="active">Active</option>
-            <option value="expired">Expired</option>
-            <option value="inactive">Inactive</option>
+            <option value="all">All Keys ({apiKeys.length})</option>
+            <option value="active">Active ({getActiveKeysCount()})</option>
+            <option value="expired">Expired ({getExpiredKeysCount()})</option>
+            <option value="inactive">Inactive ({apiKeys.filter(k => !k.isActive).length})</option>
           </select>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div className="flex items-center space-x-3 flex-wrap gap-2">
           <AnimatePresence>
             {selectedKeys.size > 0 && (
               <motion.button
@@ -297,45 +359,49 @@ const ManageKeys: React.FC = () => {
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.9 }}
                 onClick={handleBulkDelete}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors"
+                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
               >
-                <Trash2 className="w-4 h-4 mr-2" />
-                Delete ({selectedKeys.size})
+                <Trash2 className="w-4 h-4" />
+                <span>Delete ({selectedKeys.size})</span>
               </motion.button>
             )}
           </AnimatePresence>
 
           <motion.button
             whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={exportKeys}
-            className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors"
+            disabled={filteredKeys.length === 0}
+            className="px-4 py-2 bg-gray-600 hover:bg-gray-700 disabled:bg-gray-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
           >
-            <Download className="w-4 h-4 mr-2" />
-            Export
+            <Download className="w-4 h-4" />
+            <span>Export</span>
           </motion.button>
 
           <motion.button
             whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={handleCleanExpired}
-            className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg transition-colors"
+            disabled={getExpiredKeysCount() === 0}
+            className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-yellow-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
           >
-            <RefreshCw className="w-4 h-4 mr-2" />
-            Clean Expired
+            <RefreshCw className="w-4 h-4" />
+            <span>Clean Expired</span>
           </motion.button>
 
           <motion.button
             whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
             onClick={() => fetchKeys(false)}
             disabled={keysLoading}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors"
+            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
           >
-            <RefreshCw className={`w-4 h-4 mr-2 ${keysLoading ? 'animate-spin' : ''}`} />
-            Refresh
+            <RefreshCw className={`w-4 h-4 ${keysLoading ? 'animate-spin' : ''}`} />
+            <span>Refresh</span>
           </motion.button>
         </div>
       </div>
 
-      {/* Table */}
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
@@ -356,16 +422,16 @@ const ManageKeys: React.FC = () => {
                       />
                     </th>
                     <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Key Info
+                      Key Information
                     </th>
                     <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Status
                     </th>
                     <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Limits
+                      Rate Limits
                     </th>
                     <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                      Usage
+                      Usage Progress
                     </th>
                     <th className="px-6 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                       Expiration
@@ -380,6 +446,8 @@ const ManageKeys: React.FC = () => {
                     {paginatedKeys.map((key, index) => {
                       const status = getKeyStatus(key);
                       const isSelected = selectedKeys.has(key.id);
+                      const usagePercentage = calculateUsagePercentage(key.usageCount, key.totalRequests);
+                      const isExpiringSoon = new Date(key.expiration).getTime() - Date.now() < 7 * 24 * 60 * 60 * 1000;
                       
                       return (
                         <motion.tr
@@ -404,32 +472,45 @@ const ManageKeys: React.FC = () => {
                             <div className="space-y-2">
                               <div className="flex items-center space-x-3">
                                 <span className="font-medium text-gray-900 dark:text-white">
-                                  {key.name || 'Untitled'}
+                                  {key.name || 'Untitled Key'}
                                 </span>
                                 <motion.button
                                   whileHover={{ scale: 1.1 }}
                                   whileTap={{ scale: 0.9 }}
-                                  onClick={() => copyToClipboard(key.id)}
+                                  onClick={() => copyToClipboard(key.id, key.id)}
                                   className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                                  title="Copy full API key"
                                 >
-                                  <Copy className="w-4 h-4" />
+                                  {copyStates[key.id] ? (
+                                    <CheckCircle className="w-4 h-4 text-green-500" />
+                                  ) : (
+                                    <Copy className="w-4 h-4" />
+                                  )}
                                 </motion.button>
                               </div>
                               <code className="text-xs text-gray-500 font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
-                                {key.maskedKey}
+                                {key.maskedKey || maskAPIKey(key.id)}
                               </code>
                             </div>
                           </td>
                           <td className="px-6 py-4">
                             <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
+                              {status === 'active' && <Activity className="w-3 h-3 mr-1" />}
+                              {status === 'expired' && <Clock className="w-3 h-3 mr-1" />}
+                              {status === 'inactive' && <X className="w-3 h-3 mr-1" />}
                               {status.charAt(0).toUpperCase() + status.slice(1)}
                             </span>
+                            {status === 'active' && isExpiringSoon && (
+                              <div className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">
+                                Expires soon
+                              </div>
+                            )}
                           </td>
                           <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">
                             <div className="space-y-1">
                               <div className="flex items-center space-x-1">
                                 <Zap className="w-3 h-3 text-yellow-500" />
-                                <span>{key.rpm} RPM</span>
+                                <span>{key.rpm.toLocaleString()} RPM</span>
                               </div>
                               <div className="flex items-center space-x-1">
                                 <Users className="w-3 h-3 text-blue-500" />
@@ -438,16 +519,23 @@ const ManageKeys: React.FC = () => {
                             </div>
                           </td>
                           <td className="px-6 py-4 text-sm text-gray-500 dark:text-gray-400">
-                            <div className="space-y-1">
-                              <div>{key.usageCount.toLocaleString()} used</div>
-                              <div className="text-xs">of {key.totalRequests.toLocaleString()}</div>
-                              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1">
+                            <div className="space-y-2">
+                              <div className="flex justify-between items-center">
+                                <span>{key.usageCount.toLocaleString()}</span>
+                                <span className="text-xs">of {key.totalRequests.toLocaleString()}</span>
+                              </div>
+                              <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
                                 <div 
-                                  className="bg-blue-600 h-1 rounded-full transition-all duration-300" 
-                                  style={{ 
-                                    width: `${Math.min((key.usageCount / key.totalRequests) * 100, 100)}%` 
-                                  }}
+                                  className={`h-2 rounded-full transition-all duration-300 ${
+                                    usagePercentage >= 90 ? 'bg-red-500' :
+                                    usagePercentage >= 75 ? 'bg-yellow-500' :
+                                    'bg-blue-500'
+                                  }`}
+                                  style={{ width: `${usagePercentage}%` }}
                                 ></div>
+                              </div>
+                              <div className="text-xs">
+                                {usagePercentage.toFixed(1)}% used
                               </div>
                             </div>
                           </td>
@@ -456,11 +544,15 @@ const ManageKeys: React.FC = () => {
                               <Calendar className="w-3 h-3" />
                               <span>{format(new Date(key.expiration), 'MMM dd, yyyy')}</span>
                             </div>
+                            <div className="text-xs text-gray-400 mt-1">
+                              {format(new Date(key.expiration), 'HH:mm')}
+                            </div>
                           </td>
                           <td className="px-6 py-4 text-right text-sm font-medium">
                             <div className="relative">
                               <motion.button
                                 whileHover={{ scale: 1.1 }}
+                                whileTap={{ scale: 0.9 }}
                                 onClick={() => setActionMenuKey(actionMenuKey === key.id ? null : key.id)}
                                 className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
                               >
@@ -480,21 +572,21 @@ const ManageKeys: React.FC = () => {
                                       className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                                     >
                                       <Edit3 className="w-4 h-4 mr-3" />
-                                      Edit
+                                      Edit Key
                                     </button>
                                     <button
-                                      onClick={() => copyToClipboard(key.id)}
+                                      onClick={() => copyToClipboard(key.id, key.id)}
                                       className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                                     >
                                       <Copy className="w-4 h-4 mr-3" />
-                                      Copy Key
+                                      Copy Full Key
                                     </button>
                                     <button
-                                      onClick={() => handleDelete(key.id)}
+                                      onClick={() => handleDelete(key.id, key.name)}
                                       className="flex items-center w-full px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                                     >
                                       <Trash2 className="w-4 h-4 mr-3" />
-                                      Delete
+                                      Delete Key
                                     </button>
                                   </motion.div>
                                 )}
@@ -509,21 +601,20 @@ const ManageKeys: React.FC = () => {
               </table>
             </div>
 
-            {/* Pagination */}
             {totalPages > 1 && (
               <div className="bg-gray-50 dark:bg-gray-900 px-6 py-4 flex items-center justify-between border-t border-gray-200 dark:border-gray-700">
                 <div className="flex-1 flex justify-between sm:hidden">
                   <button
                     onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                     disabled={currentPage === 1}
-                    className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                    className="relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Previous
                   </button>
                   <button
                     onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                     disabled={currentPage === totalPages}
-                    className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50"
+                    className="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 text-sm font-medium rounded-md text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     Next
                   </button>
@@ -538,19 +629,32 @@ const ManageKeys: React.FC = () => {
                   </div>
                   <div>
                     <nav className="relative z-0 inline-flex rounded-md shadow-sm -space-x-px">
-                      {Array.from({ length: totalPages }, (_, i) => i + 1).map((page) => (
-                        <button
-                          key={page}
-                          onClick={() => setCurrentPage(page)}
-                          className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium ${
-                            page === currentPage
-                              ? 'z-10 bg-blue-50 border-blue-500 text-blue-600'
-                              : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50'
-                          } ${page === 1 ? 'rounded-l-md' : ''} ${page === totalPages ? 'rounded-r-md' : ''}`}
-                        >
-                          {page}
-                        </button>
-                      ))}
+                      {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+                        let page;
+                        if (totalPages <= 7) {
+                          page = i + 1;
+                        } else if (currentPage <= 4) {
+                          page = i + 1;
+                        } else if (currentPage >= totalPages - 3) {
+                          page = totalPages - 6 + i;
+                        } else {
+                          page = currentPage - 3 + i;
+                        }
+                        
+                        return (
+                          <button
+                            key={page}
+                            onClick={() => setCurrentPage(page)}
+                            className={`relative inline-flex items-center px-4 py-2 border text-sm font-medium transition-colors ${
+                              page === currentPage
+                                ? 'z-10 bg-blue-50 border-blue-500 text-blue-600 dark:bg-blue-900/20 dark:border-blue-400 dark:text-blue-400'
+                                : 'bg-white border-gray-300 text-gray-500 hover:bg-gray-50 dark:bg-gray-800 dark:border-gray-600 dark:text-gray-400 dark:hover:bg-gray-700'
+                            } ${page === 1 ? 'rounded-l-md' : ''} ${page === Math.min(totalPages, 7) ? 'rounded-r-md' : ''}`}
+                          >
+                            {page}
+                          </button>
+                        );
+                      })}
                     </nav>
                   </div>
                 </div>
@@ -559,30 +663,50 @@ const ManageKeys: React.FC = () => {
           </>
         ) : (
           <div className="text-center py-12">
-            <div className="text-gray-500 dark:text-gray-400">
-              {searchTerm || filterStatus !== 'all' ? 'No keys match your filters' : 'No API keys found'}
+            <div className="space-y-4">
+              <div className="text-gray-500 dark:text-gray-400">
+                {searchTerm || filterStatus !== 'all' ? (
+                  <div>
+                    <p className="text-lg font-medium mb-2">No keys match your filters</p>
+                    <p className="text-sm">Try adjusting your search or filter criteria</p>
+                  </div>
+                ) : (
+                  <div>
+                    <p className="text-lg font-medium mb-2">No API keys found</p>
+                    <p className="text-sm">Create your first API key to get started</p>
+                  </div>
+                )}
+              </div>
+              {(!searchTerm && filterStatus === 'all') && (
+                <motion.button
+                  whileHover={{ scale: 1.05 }}
+                  whileTap={{ scale: 0.95 }}
+                  onClick={() => window.location.href = '/create'}
+                  className="mt-4 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-flex items-center space-x-2"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Create your first API key</span>
+                </motion.button>
+              )}
             </div>
-            {(!searchTerm && filterStatus === 'all') && (
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                onClick={() => window.location.href = '/create'}
-                className="mt-4 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-              >
-                <Plus className="w-4 h-4 mr-2 inline" />
-                Create your first API key
-              </motion.button>
-            )}
           </div>
         )}
       </motion.div>
 
       {filteredKeys.length > 0 && (
         <div className="text-sm text-gray-500 dark:text-gray-400 text-center">
-          Showing {filteredKeys.length} of {apiKeys.length} API keys
+          Displaying {filteredKeys.length} of {apiKeys.length} total API keys
         </div>
       )}
     </div>
   );
 };
+
+function maskAPIKey(key: string): string {
+  if (key.length <= 8) {
+    return '*'.repeat(key.length);
+  }
+  return key.substring(0, 4) + '*'.repeat(key.length - 8) + key.substring(key.length - 4);
+}
 
 export default ManageKeys;
