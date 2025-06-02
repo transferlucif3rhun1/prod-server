@@ -3,6 +3,7 @@ import { Routes, Route, Navigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { useAuth } from './hooks/useAuth';
 import { useWebSocket } from './hooks/useWebSocket';
+import { useStore } from './store/useStore';
 import Layout from './components/Layout';
 import Login from './components/Login';
 import CreateKey from './components/CreateKey';
@@ -18,33 +19,59 @@ const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) =
 
 const App: React.FC = () => {
   const { isAuthenticated } = useAuth();
+  const { setCurrentPage } = useStore();
   
+  // Handle WebSocket messages globally
   const handleWebSocketMessage = (event: WSEvent) => {
+    // Global WebSocket message handling
     switch (event.type) {
-      case 'key_created':
-        toast.success('New API key created');
+      case 'system_update':
+        if (event.data?.message) {
+          toast.success(event.data.message);
+        }
         break;
-      case 'key_updated':
-        toast.success('API key updated');
-        break;
-      case 'key_deleted':
-        toast.success('API key deleted');
+      case 'error':
+        if (event.data?.message) {
+          toast.error(event.data.message);
+        }
         break;
       default:
+        // Other events are handled by the store
         break;
     }
   };
 
-  useWebSocket(handleWebSocketMessage);
+  // Initialize WebSocket connection
+  const { isConnected } = useWebSocket(handleWebSocketMessage);
 
+  // Set theme based on user preference or system preference
   useEffect(() => {
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     const storedTheme = localStorage.getItem('theme');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
     
     if (storedTheme === 'dark' || (!storedTheme && prefersDark)) {
       document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
     }
   }, []);
+
+  // Update current page in store
+  useEffect(() => {
+    const path = window.location.pathname;
+    setCurrentPage(path);
+  }, [setCurrentPage]);
+
+  // Show connection status
+  useEffect(() => {
+    if (isAuthenticated) {
+      if (isConnected) {
+        toast.success('Real-time connection established', { id: 'ws-status' });
+      } else {
+        toast.error('Real-time connection lost', { id: 'ws-status' });
+      }
+    }
+  }, [isConnected, isAuthenticated]);
 
   return (
     <motion.div
