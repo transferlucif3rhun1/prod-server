@@ -1,0 +1,14 @@
+{
+  "serverPort": "3001",
+  "mongoURI": "mongodb+srv://mongodbapikeys:mongodbapikeys@apikeysmanager.mmm8e.mongodb.net/?retryWrites=true&w=majority&appName=apiKeysManager",
+  "databaseName": "apikeys",
+  "apiKeysCollection": "keys",
+  "logsCollection": "logs",
+  "readTimeout": 30,
+  "writeTimeout": 30,
+  "idleTimeout": 60,
+  "jwtSecret": "your-super-secret-jwt-key-change-this-in-production",
+  "adminPassword": "admin123",
+  "maxRetries": 3,
+  "retryDelay": 1000
+}
