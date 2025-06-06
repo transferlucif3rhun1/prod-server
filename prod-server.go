@@ -128,6 +128,19 @@ type WSMessage struct {
 	Data interface{} `json:"data"`
 }
 
+type PaginationInfo struct {
+	Page       int   `json:"page"`
+	Limit      int   `json:"limit"`
+	Total      int64 `json:"total"`
+	TotalPages int   `json:"totalPages"`
+}
+
+type ApiResponse struct {
+	Data       interface{}     `json:"data"`
+	Message    string          `json:"message,omitempty"`
+	Pagination *PaginationInfo `json:"pagination,omitempty"`
+}
+
 type Cache struct {
 	keyToAPIKey sync.Map
 	hits        int64
@@ -284,7 +297,7 @@ func (m *APIKeyManager) connectMongo() error {
 	m.logsCollection = m.mongoClient.Database(m.config.DatabaseName).Collection(m.config.LogsCollection)
 
 	m.setMongoStatus(true)
-	log.Printf("✅ Successfully connected to MongoDB")
+	log.Printf("Successfully connected to MongoDB")
 	return nil
 }
 
@@ -671,8 +684,8 @@ func (m *APIKeyManager) createAPIKeyHandler(c *gin.Context) {
 		return
 	}
 
-	if req.TotalRequests <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Total requests must be greater than 0"})
+	if req.TotalRequests < 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Total requests must be greater than or equal to 0"})
 		return
 	}
 
@@ -684,9 +697,9 @@ func (m *APIKeyManager) createAPIKeyHandler(c *gin.Context) {
 	}
 
 	log.Printf("API key created successfully for %s", c.ClientIP())
-	c.JSON(http.StatusOK, gin.H{
-		"message": "API key created successfully",
-		"data":    m.toAPIKeyResponse(apiKey),
+	c.JSON(http.StatusOK, ApiResponse{
+		Data:    m.toAPIKeyResponse(apiKey),
+		Message: "API key created successfully",
 	})
 }
 
@@ -722,14 +735,16 @@ func (m *APIKeyManager) listAPIKeysHandler(c *gin.Context) {
 
 	log.Printf("Returning %d API keys to %s", len(response), c.ClientIP())
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": response,
-		"pagination": gin.H{
-			"page":       page,
-			"limit":      limit,
-			"total":      total,
-			"totalPages": (total + limit - 1) / limit,
-		},
+	pagination := &PaginationInfo{
+		Page:       page,
+		Limit:      limit,
+		Total:      int64(total),
+		TotalPages: (total + limit - 1) / limit,
+	}
+
+	c.JSON(http.StatusOK, ApiResponse{
+		Data:       response,
+		Pagination: pagination,
 	})
 }
 
@@ -746,7 +761,9 @@ func (m *APIKeyManager) getAPIKeyHandler(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": m.toAPIKeyResponse(apiKey)})
+	c.JSON(http.StatusOK, ApiResponse{
+		Data: m.toAPIKeyResponse(apiKey),
+	})
 }
 
 func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
@@ -790,8 +807,8 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		apiKey.ThreadsLimit = *req.ThreadsLimit
 	}
 	if req.TotalRequests != nil {
-		if *req.TotalRequests <= 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Total requests must be greater than 0"})
+		if *req.TotalRequests < 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Total requests must be greater than or equal to 0"})
 			return
 		}
 		apiKey.TotalRequests = *req.TotalRequests
@@ -822,9 +839,9 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		Data: m.toAPIKeyResponse(apiKey),
 	})
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "API key updated successfully",
-		"data":    m.toAPIKeyResponse(apiKey),
+	c.JSON(http.StatusOK, ApiResponse{
+		Data:    m.toAPIKeyResponse(apiKey),
+		Message: "API key updated successfully",
 	})
 }
 
@@ -932,6 +949,10 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))
+	level := c.Query("level")
+	component := c.Query("component")
+	search := c.Query("search")
+
 	if page < 1 {
 		page = 1
 	}
@@ -940,6 +961,18 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 	}
 
 	filter := bson.M{}
+	if level != "" && level != "all" {
+		filter["level"] = level
+	}
+	if component != "" && component != "all" {
+		filter["component"] = component
+	}
+	if search != "" {
+		filter["$or"] = []bson.M{
+			{"message": bson.M{"$regex": search, "$options": "i"}},
+			{"component": bson.M{"$regex": search, "$options": "i"}},
+		}
+	}
 
 	ctx, cancel := context.WithTimeout(m.ctx, 10*time.Second)
 	defer cancel()
@@ -950,6 +983,8 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to count logs"})
 		return
 	}
+
+	totalPages := int((totalCount + int64(limit) - 1) / int64(limit))
 
 	opts := options.Find().
 		SetSort(bson.D{{Key: "timestamp", Value: -1}}).
@@ -971,14 +1006,20 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"data": logs,
-		"pagination": gin.H{
-			"page":       page,
-			"limit":      limit,
-			"total":      totalCount,
-			"totalPages": (totalCount + int64(limit) - 1) / int64(limit),
-		},
+	if logs == nil {
+		logs = []LogEntry{}
+	}
+
+	pagination := &PaginationInfo{
+		Page:       page,
+		Limit:      limit,
+		Total:      totalCount,
+		TotalPages: totalPages,
+	}
+
+	c.JSON(http.StatusOK, ApiResponse{
+		Data:       logs,
+		Pagination: pagination,
 	})
 }
 
@@ -1173,12 +1214,12 @@ func (m *APIKeyManager) shutdown() {
 			m.mongoClient.Disconnect(ctx)
 		}
 
-		log.Printf("✅ Shutdown complete")
+		log.Printf("Shutdown complete")
 	})
 }
 
 func main() {
-	log.Printf("🚀 Starting API Key Manager Server...")
+	log.Printf("Starting API Key Manager Server...")
 
 	runtime.GOMAXPROCS(runtime.NumCPU())
 	gin.SetMode(gin.ReleaseMode)
@@ -1193,12 +1234,12 @@ func main() {
 	manager := NewAPIKeyManager(config)
 
 	if err := manager.connectMongo(); err != nil {
-		log.Printf("⚠️  MongoDB connection failed: %v", err)
+		log.Printf("MongoDB connection failed: %v", err)
 		log.Printf("Server will start but database features will be limited")
 	}
 
 	if err := manager.loadAPIKeysToCache(); err != nil {
-		log.Printf("⚠️  Failed to load API keys to cache: %v", err)
+		log.Printf("Failed to load API keys to cache: %v", err)
 	}
 
 	manager.eventBroadcaster()
@@ -1210,7 +1251,7 @@ func main() {
 
 	staticFS, err := static.EmbedFolder(staticFiles, "frontend/dist")
 	if err != nil {
-		log.Printf("⚠️  Error creating static file system: %v", err)
+		log.Printf("Error creating static file system: %v", err)
 	} else {
 		router.Use(static.Serve("/", staticFS))
 	}
@@ -1258,15 +1299,15 @@ func main() {
 		}
 	}()
 
-	log.Printf("✅ Server is ready and listening on http://localhost:%s", config.ServerPort)
-	log.Printf("📊 Health check: http://localhost:%s/api/v1/health", config.ServerPort)
-	log.Printf("🔐 Admin login required for management interface")
+	log.Printf("Server is ready and listening on http://localhost:%s", config.ServerPort)
+	log.Printf("Health check: http://localhost:%s/api/v1/health", config.ServerPort)
+	log.Printf("Admin login required for management interface")
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("🛑 Shutting down server...")
+	log.Println("Shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1277,5 +1318,5 @@ func main() {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
-	log.Println("✅ Server exited gracefully")
+	log.Println("Server exited gracefully")
 }

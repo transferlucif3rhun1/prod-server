@@ -60,11 +60,20 @@ const Logs: React.FC = () => {
   const { isConnected } = useWebSocket(handleWebSocketMessage);
 
   const logLevels = ['all', 'INFO', 'WARN', 'ERROR', 'DEBUG'];
-  const logIcons = {
-    INFO: Info,
-    WARN: AlertTriangle,
-    ERROR: AlertCircle,
-    DEBUG: Bug
+
+  const getLogIcon = (level: string) => {
+    switch (level) {
+      case 'INFO':
+        return Info;
+      case 'WARN':
+        return AlertTriangle;
+      case 'ERROR':
+        return AlertCircle;
+      case 'DEBUG':
+        return Bug;
+      default:
+        return Info;
+    }
   };
 
   const logColors = {
@@ -96,7 +105,8 @@ const Logs: React.FC = () => {
   }, [filteredLogs, autoScroll]);
 
   useEffect(() => {
-    const uniqueComponents = Array.from(new Set(logs.map(log => log.component))).sort();
+    const safeLogsList = Array.isArray(logs) ? logs : [];
+    const uniqueComponents = Array.from(new Set(safeLogsList.map(log => log.component))).sort();
     setComponents(uniqueComponents);
   }, [logs]);
 
@@ -131,12 +141,12 @@ const Logs: React.FC = () => {
 
       const response = await apiService.getLogs(params, false);
       
-      // Fix: Ensure we handle the response structure correctly
-      const logsData = Array.isArray(response.data) ? response.data : (response.data?.data || []);
-      const pagination = response.pagination || response.data?.pagination;
+      const logsData = Array.isArray(response.data) ? response.data : [];
+      const pagination = response.pagination;
 
       if (append) {
-        setLogs([...logs, ...logsData]);
+        const currentLogs = Array.isArray(logs) ? logs : [];
+        setLogs([...currentLogs, ...logsData]);
       } else {
         setLogs(logsData);
       }
@@ -158,7 +168,6 @@ const Logs: React.FC = () => {
   }, [levelFilter, componentFilter, searchTerm, logs, setLogs, setLogsLoading, setLogsError]);
 
   const filterLogs = useCallback(() => {
-    // Fix: Ensure logs is always an array
     const safeLogsList = Array.isArray(logs) ? logs : [];
     let filtered = [...safeLogsList];
 
@@ -228,16 +237,6 @@ const Logs: React.FC = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     toast.success(`Exported ${filteredLogs.length} log entries`);
-  };
-
-  const clearLogs = () => {
-    if (!confirm('Are you sure you want to clear all logs from view? This action cannot be undone.')) {
-      return;
-    }
-    setLogs([]);
-    setFilteredLogs([]);
-    setExpandedLogs(new Set());
-    toast.success('Logs cleared from view');
   };
 
   const clearFilters = () => {
@@ -450,7 +449,7 @@ const Logs: React.FC = () => {
 
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {getLevelStats().map(({ level, count }) => {
-          const Icon = logIcons[level as keyof typeof logIcons];
+          const IconComponent = getLogIcon(level);
           
           return (
             <motion.div
@@ -465,7 +464,7 @@ const Logs: React.FC = () => {
                   level === 'ERROR' ? 'bg-red-100 dark:bg-red-900/20' :
                   'bg-gray-100 dark:bg-gray-900/20'
                 }`}>
-                  <Icon className={`w-4 h-4 ${logTextColors[level as keyof typeof logTextColors]}`} />
+                  <IconComponent className={`w-4 h-4 ${logTextColors[level as keyof typeof logTextColors] || 'text-gray-600 dark:text-gray-400'}`} />
                 </div>
                 <div>
                   <p className="text-sm text-gray-600 dark:text-gray-400">{level}</p>
@@ -525,7 +524,7 @@ const Logs: React.FC = () => {
         >
           <AnimatePresence>
             {filteredLogs.map((log, index) => {
-              const Icon = logIcons[log.level as keyof typeof logIcons] || Info;
+              const IconComponent = getLogIcon(log.level);
               const logId = log.id || `${index}-${log.timestamp}`;
               const isExpanded = expandedLogs.has(logId);
               const hasMetadata = log.metadata && Object.keys(log.metadata).length > 0;
@@ -539,12 +538,12 @@ const Logs: React.FC = () => {
                   exit={{ opacity: 0, x: 20 }}
                   transition={{ delay: index * 0.02 }}
                   className={`p-4 rounded-xl border-l-4 transition-all duration-200 hover:shadow-md ${
-                    logColors[log.level as keyof typeof logColors]
+                    logColors[log.level as keyof typeof logColors] || 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20'
                   }`}
                 >
                   <div className="flex items-start space-x-3">
-                    <Icon className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
-                      logTextColors[log.level as keyof typeof logTextColors]
+                    <IconComponent className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
+                      logTextColors[log.level as keyof typeof logTextColors] || 'text-gray-600 dark:text-gray-400'
                     }`} />
 
                     <div className="flex-1 min-w-0">
