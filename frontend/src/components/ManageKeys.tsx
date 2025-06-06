@@ -47,6 +47,14 @@ const ManageKeys: React.FC = () => {
   const [filterStatus, setFilterStatus] = useState('all');
   const [editingKey, setEditingKey] = useState<APIKey | null>(null);
   const [showEditModal, setShowEditModal] = useState(false);
+  const [editForm, setEditForm] = useState({
+    name: '',
+    rpm: 0,
+    threadsLimit: 0,
+    totalRequests: 0,
+    isActive: true
+  });
+  const [editLoading, setEditLoading] = useState(false);
   const [actionMenuKey, setActionMenuKey] = useState<string | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10);
@@ -169,8 +177,68 @@ const ManageKeys: React.FC = () => {
 
   const handleEdit = (key: APIKey) => {
     setEditingKey(key);
+    setEditForm({
+      name: key.name || '',
+      rpm: key.rpm,
+      threadsLimit: key.threadsLimit,
+      totalRequests: key.totalRequests,
+      isActive: key.isActive
+    });
     setShowEditModal(true);
     setActionMenuKey(null);
+  };
+
+  const handleEditSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingKey) return;
+
+    setEditLoading(true);
+    try {
+      const updateData: UpdateKeyRequest = {};
+      
+      if (editForm.name !== editingKey.name) {
+        updateData.name = editForm.name;
+      }
+      if (editForm.rpm !== editingKey.rpm) {
+        updateData.rpm = editForm.rpm;
+      }
+      if (editForm.threadsLimit !== editingKey.threadsLimit) {
+        updateData.threadsLimit = editForm.threadsLimit;
+      }
+      if (editForm.totalRequests !== editingKey.totalRequests) {
+        updateData.totalRequests = editForm.totalRequests;
+      }
+      if (editForm.isActive !== editingKey.isActive) {
+        updateData.isActive = editForm.isActive;
+      }
+
+      if (Object.keys(updateData).length === 0) {
+        toast.info('No changes detected');
+        setShowEditModal(false);
+        return;
+      }
+
+      const response = await apiService.updateKey(editingKey.id, updateData);
+      updateApiKey(response.data);
+      toast.success('API key updated successfully');
+      setShowEditModal(false);
+    } catch (error: any) {
+      toast.error(error.message || 'Failed to update API key');
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  const handleEditCancel = () => {
+    setShowEditModal(false);
+    setEditingKey(null);
+    setEditForm({
+      name: '',
+      rpm: 0,
+      threadsLimit: 0,
+      totalRequests: 0,
+      isActive: true
+    });
   };
 
   const handleDelete = async (keyId: string, keyName?: string) => {
@@ -314,6 +382,25 @@ const ManageKeys: React.FC = () => {
     return Math.min((used / total) * 100, 100);
   };
 
+  const formatUsageDisplay = (used: number, total: number) => {
+    if (total === 0) {
+      return {
+        text: `${used.toLocaleString()} used`,
+        subtext: 'Unlimited available',
+        percentage: null,
+        isUnlimited: true
+      };
+    }
+    
+    const percentage = calculateUsagePercentage(used, total);
+    return {
+      text: `${used.toLocaleString()}/${total.toLocaleString()}`,
+      subtext: `${percentage.toFixed(1)}% used`,
+      percentage: percentage,
+      isUnlimited: false
+    };
+  };
+
   const totalPages = Math.ceil(filteredKeys.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const paginatedKeys = filteredKeys.slice(startIndex, startIndex + itemsPerPage);
@@ -349,9 +436,9 @@ const ManageKeys: React.FC = () => {
   }
 
   const renderTableView = () => (
-    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
-      <div className="overflow-x-auto">
-        <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700">
+      <div className="w-full">
+        <table className="w-full divide-y divide-gray-200 dark:divide-gray-700">
           <thead className="bg-gray-50 dark:bg-gray-900">
             <tr>
               <th className="px-4 py-4 text-left w-12">
@@ -469,35 +556,37 @@ const ManageKeys: React.FC = () => {
                     </td>
                     <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
                       <div className="space-y-2">
-                        <div className="flex justify-between items-center">
-                          <span>{key.usageCount.toLocaleString()}</span>
-                          <span className="text-xs">
-                            of {key.totalRequests === 0 ? 'Unlimited' : key.totalRequests.toLocaleString()}
-                          </span>
-                        </div>
-                        {key.totalRequests > 0 && (
-                          <>
-                            <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                              <div 
-                                className={`h-2 rounded-full transition-all duration-300 ${
-                                  usagePercentage >= 90 ? 'bg-red-500' :
-                                  usagePercentage >= 75 ? 'bg-yellow-500' :
-                                  'bg-blue-500'
-                                }`}
-                                style={{ width: `${usagePercentage}%` }}
-                              ></div>
-                            </div>
-                            <div className="text-xs">
-                              {usagePercentage.toFixed(1)}% used
-                            </div>
-                          </>
-                        )}
-                        {key.totalRequests === 0 && (
-                          <div className="flex items-center text-xs text-blue-600 dark:text-blue-400">
-                            <Infinity className="w-3 h-3 mr-1" />
-                            Unlimited usage
-                          </div>
-                        )}
+                        {(() => {
+                          const usage = formatUsageDisplay(key.usageCount, key.totalRequests);
+                          return (
+                            <>
+                              <div className="font-medium text-gray-900 dark:text-white">
+                                {usage.text}
+                              </div>
+                              <div className="text-xs text-gray-500 dark:text-gray-400">
+                                {usage.subtext}
+                              </div>
+                              {!usage.isUnlimited && usage.percentage !== null && (
+                                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                                  <div 
+                                    className={`h-2 rounded-full transition-all duration-300 ${
+                                      usage.percentage >= 90 ? 'bg-red-500' :
+                                      usage.percentage >= 75 ? 'bg-yellow-500' :
+                                      'bg-blue-500'
+                                    }`}
+                                    style={{ width: `${usage.percentage}%` }}
+                                  ></div>
+                                </div>
+                              )}
+                              {usage.isUnlimited && (
+                                <div className="flex items-center text-xs text-blue-600 dark:text-blue-400">
+                                  <Infinity className="w-3 h-3 mr-1" />
+                                  No limits applied
+                                </div>
+                              )}
+                            </>
+                          );
+                        })()}
                       </div>
                     </td>
                     <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
@@ -588,31 +677,45 @@ const ManageKeys: React.FC = () => {
                 isSelected ? 'border-blue-500 dark:border-blue-400' : 'border-gray-200 dark:border-gray-700'
               }`}
             >
-              <div className="p-6">
-                <div className="flex items-start justify-between mb-4">
-                  <div className="flex items-center space-x-3">
+              <div className="p-4">
+                {/* Header with checkbox, name, and actions */}
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center space-x-3 flex-1 min-w-0">
                     <input
                       type="checkbox"
                       checked={isSelected}
                       onChange={() => toggleKeySelection(key.id)}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 flex-shrink-0"
                     />
-                    <div className="flex-1">
-                      <h3 className="font-semibold text-gray-900 dark:text-white truncate">
-                        {key.name || 'Untitled Key'}
-                      </h3>
-                      <code className="text-xs text-gray-500 font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded mt-1 block">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center space-x-2 mb-1">
+                        <h3 className="font-semibold text-gray-900 dark:text-white truncate">
+                          {key.name || 'Untitled Key'}
+                        </h3>
+                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
+                          {status === 'active' && <Activity className="w-3 h-3 mr-1" />}
+                          {status === 'expired' && <Clock className="w-3 h-3 mr-1" />}
+                          {status === 'inactive' && <X className="w-3 h-3 mr-1" />}
+                          {status.charAt(0).toUpperCase() + status.slice(1)}
+                        </span>
+                        {status === 'active' && isExpiringSoon && (
+                          <span className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900/20 px-2 py-0.5 rounded">
+                            Expires soon
+                          </span>
+                        )}
+                      </div>
+                      <code className="text-xs text-gray-500 font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
                         {key.maskedKey || maskAPIKey(key.id)}
                       </code>
                     </div>
                   </div>
                   
-                  <div className="flex items-center space-x-2">
+                  <div className="flex items-center space-x-1 flex-shrink-0">
                     <motion.button
                       whileHover={{ scale: 1.1 }}
                       whileTap={{ scale: 0.9 }}
                       onClick={() => copyToClipboard(key.id, key.id)}
-                      className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                      className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1"
                       title="Copy full API key"
                     >
                       {copyStates[key.id] ? (
@@ -630,7 +733,7 @@ const ManageKeys: React.FC = () => {
                           e.stopPropagation();
                           setActionMenuKey(actionMenuKey === key.id ? null : key.id);
                         }}
-                        className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                        className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1"
                       >
                         <MoreVertical className="w-4 h-4" />
                       </motion.button>
@@ -672,83 +775,82 @@ const ManageKeys: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between mb-4">
-                  <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
-                    {status === 'active' && <Activity className="w-3 h-3 mr-1" />}
-                    {status === 'expired' && <Clock className="w-3 h-3 mr-1" />}
-                    {status === 'inactive' && <X className="w-3 h-3 mr-1" />}
-                    {status.charAt(0).toUpperCase() + status.slice(1)}
-                  </span>
-                  {status === 'active' && isExpiringSoon && (
-                    <span className="text-xs text-yellow-600 dark:text-yellow-400">
-                      Expires soon
-                    </span>
-                  )}
-                </div>
-
-                <div className="grid grid-cols-2 gap-4 mb-4">
-                  <div className="text-center">
+                {/* Compact info grid */}
+                <div className="grid grid-cols-3 gap-3 mb-3 text-center">
+                  <div>
                     <div className="flex items-center justify-center space-x-1 text-yellow-500 mb-1">
                       {key.rpm === 0 ? (
-                        <Infinity className="w-4 h-4" />
+                        <Infinity className="w-3 h-3" />
                       ) : (
-                        <Zap className="w-4 h-4" />
+                        <Zap className="w-3 h-3" />
                       )}
                       <span className="text-xs font-medium">RPM</span>
                     </div>
-                    <div className="text-lg font-semibold text-gray-900 dark:text-white">
+                    <div className="text-sm font-semibold text-gray-900 dark:text-white">
                       {formatValue(key.rpm, 'rpm')}
                     </div>
                   </div>
-                  <div className="text-center">
+                  <div>
                     <div className="flex items-center justify-center space-x-1 text-blue-500 mb-1">
                       {key.threadsLimit === 0 ? (
-                        <Infinity className="w-4 h-4" />
+                        <Infinity className="w-3 h-3" />
                       ) : (
-                        <Users className="w-4 h-4" />
+                        <Users className="w-3 h-3" />
                       )}
                       <span className="text-xs font-medium">Threads</span>
                     </div>
-                    <div className="text-lg font-semibold text-gray-900 dark:text-white">
+                    <div className="text-sm font-semibold text-gray-900 dark:text-white">
                       {formatValue(key.threadsLimit, 'threads')}
                     </div>
                   </div>
-                </div>
-
-                <div className="mb-4">
-                  <div className="flex justify-between items-center mb-2">
-                    <span className="text-sm font-medium text-gray-700 dark:text-gray-300">Usage</span>
-                    <span className="text-xs text-gray-500 dark:text-gray-400">
-                      {key.usageCount.toLocaleString()} / {key.totalRequests === 0 ? 'Unlimited' : key.totalRequests.toLocaleString()}
-                    </span>
-                  </div>
-                  {key.totalRequests > 0 ? (
-                    <>
-                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                        <div 
-                          className={`h-2 rounded-full transition-all duration-300 ${
-                            usagePercentage >= 90 ? 'bg-red-500' :
-                            usagePercentage >= 75 ? 'bg-yellow-500' :
-                            'bg-blue-500'
-                          }`}
-                          style={{ width: `${usagePercentage}%` }}
-                        ></div>
-                      </div>
-                      <div className="text-xs text-gray-500 dark:text-gray-400 mt-1 text-center">
-                        {usagePercentage.toFixed(1)}% used
-                      </div>
-                    </>
-                  ) : (
-                    <div className="flex items-center justify-center text-sm text-blue-600 dark:text-blue-400">
-                      <Infinity className="w-4 h-4 mr-2" />
-                      Unlimited usage available
+                  <div>
+                    <div className="flex items-center justify-center space-x-1 text-gray-500 mb-1">
+                      <Calendar className="w-3 h-3" />
+                      <span className="text-xs font-medium">Expires</span>
                     </div>
-                  )}
+                    <div className="text-xs font-medium text-gray-900 dark:text-white">
+                      {format(new Date(key.expiration), 'MMM dd')}
+                    </div>
+                  </div>
                 </div>
 
-                <div className="flex items-center justify-center space-x-2 text-sm text-gray-500 dark:text-gray-400">
-                  <Calendar className="w-4 h-4" />
-                  <span>{format(new Date(key.expiration), 'MMM dd, yyyy HH:mm')}</span>
+                {/* Usage section */}
+                <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
+                  {(() => {
+                    const usage = formatUsageDisplay(key.usageCount, key.totalRequests);
+                    return (
+                      <>
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Usage</span>
+                          <span className="text-xs font-medium text-gray-900 dark:text-white">
+                            {usage.text}
+                          </span>
+                        </div>
+                        {!usage.isUnlimited && usage.percentage !== null ? (
+                          <>
+                            <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 mb-1">
+                              <div 
+                                className={`h-1.5 rounded-full transition-all duration-300 ${
+                                  usage.percentage >= 90 ? 'bg-red-500' :
+                                  usage.percentage >= 75 ? 'bg-yellow-500' :
+                                  'bg-blue-500'
+                                }`}
+                                style={{ width: `${usage.percentage}%` }}
+                              ></div>
+                            </div>
+                            <div className="text-xs text-gray-500 dark:text-gray-400 text-center">
+                              {usage.subtext}
+                            </div>
+                          </>
+                        ) : (
+                          <div className="flex items-center justify-center text-xs text-blue-600 dark:text-blue-400">
+                            <Infinity className="w-3 h-3 mr-1" />
+                            {usage.subtext}
+                          </div>
+                        )}
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             </motion.div>
@@ -760,6 +862,134 @@ const ManageKeys: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Edit Modal */}
+      <AnimatePresence>
+        {showEditModal && editingKey && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
+            onClick={handleEditCancel}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl max-w-md w-full p-6"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                  Edit API Key
+                </h3>
+                <button
+                  onClick={handleEditCancel}
+                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleEditSubmit} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Name
+                  </label>
+                  <input
+                    type="text"
+                    value={editForm.name}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, name: e.target.value }))}
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    placeholder="API Key Name"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      RPM (0 = Unlimited)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="10000"
+                      value={editForm.rpm}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, rpm: parseInt(e.target.value) || 0 }))}
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                      Threads (0 = Unlimited)
+                    </label>
+                    <input
+                      type="number"
+                      min="0"
+                      max="1000"
+                      value={editForm.threadsLimit}
+                      onChange={(e) => setEditForm(prev => ({ ...prev, threadsLimit: parseInt(e.target.value) || 0 }))}
+                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    Total Requests (0 = Unlimited)
+                  </label>
+                  <input
+                    type="number"
+                    min="0"
+                    value={editForm.totalRequests}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, totalRequests: parseInt(e.target.value) || 0 }))}
+                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                  />
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <input
+                    type="checkbox"
+                    id="isActive"
+                    checked={editForm.isActive}
+                    onChange={(e) => setEditForm(prev => ({ ...prev, isActive: e.target.checked }))}
+                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <label htmlFor="isActive" className="text-sm font-medium text-gray-700 dark:text-gray-300">
+                    Active
+                  </label>
+                </div>
+
+                <div className="flex space-x-3 pt-4">
+                  <button
+                    type="button"
+                    onClick={handleEditCancel}
+                    className="flex-1 px-4 py-2 text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={editLoading}
+                    className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors flex items-center justify-center"
+                  >
+                    {editLoading ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
+                        Updating...
+                      </>
+                    ) : (
+                      'Update Key'
+                    )}
+                  </button>
+                </div>
+              </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div className="flex-1 flex flex-col sm:flex-row items-stretch sm:items-center space-y-3 sm:space-y-0 sm:space-x-4">
           <div className="relative flex-1 max-w-md">
