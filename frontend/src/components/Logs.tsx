@@ -16,8 +16,6 @@ import {
   AlertTriangle,
   Bug,
   Server,
-  Trash2,
-  Settings,
   Wifi,
   WifiOff,
   Eye,
@@ -25,7 +23,7 @@ import {
   ArrowUp,
   ArrowDown
 } from 'lucide-react';
-import { LogEntry, FilterOptions } from '../types';
+import { LogEntry } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -132,30 +130,37 @@ const Logs: React.FC = () => {
       if (searchTerm.trim()) params.search = searchTerm.trim();
 
       const response = await apiService.getLogs(params, false);
+      
+      // Fix: Ensure we handle the response structure correctly
+      const logsData = Array.isArray(response.data) ? response.data : (response.data?.data || []);
+      const pagination = response.pagination || response.data?.pagination;
 
       if (append) {
-        setLogs([...logs, ...response.data]);
+        setLogs([...logs, ...logsData]);
       } else {
-        setLogs(response.data);
+        setLogs(logsData);
       }
 
-      setHasMore(response.pagination ? pageNum < response.pagination.totalPages : false);
+      setHasMore(pagination ? pageNum < pagination.totalPages : false);
       setLastUpdateTime(new Date());
       
-      if (response.data.length === 0 && pageNum === 1) {
+      if (logsData.length === 0 && pageNum === 1) {
         toast.info('No logs found matching your criteria');
       }
     } catch (error: any) {
       const errorMessage = error.message || 'Failed to load logs. Please try again.';
       setLogsError(errorMessage);
       toast.error(errorMessage);
+      console.error('Failed to fetch logs:', error);
     } finally {
       setLogsLoading(false);
     }
   }, [levelFilter, componentFilter, searchTerm, logs, setLogs, setLogsLoading, setLogsError]);
 
   const filterLogs = useCallback(() => {
-    let filtered = [...logs];
+    // Fix: Ensure logs is always an array
+    const safeLogsList = Array.isArray(logs) ? logs : [];
+    let filtered = [...safeLogsList];
 
     if (searchTerm.trim()) {
       const searchLower = searchTerm.toLowerCase();
@@ -274,9 +279,10 @@ const Logs: React.FC = () => {
   };
 
   const getLevelStats = () => {
+    const safeLogsList = Array.isArray(logs) ? logs : [];
     const stats = logLevels.slice(1).map(level => ({
       level,
-      count: logs.filter(log => log.level === level).length
+      count: safeLogsList.filter(log => log.level === level).length
     }));
     return stats;
   };
@@ -290,7 +296,7 @@ const Logs: React.FC = () => {
     };
   };
 
-  if (logsLoading && logs.length === 0) {
+  if (logsLoading && (!logs || logs.length === 0)) {
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
         <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
@@ -473,7 +479,7 @@ const Logs: React.FC = () => {
 
       <div className="flex items-center justify-between">
         <div className="text-sm text-gray-600 dark:text-gray-400">
-          Showing {filteredLogs.length.toLocaleString()} of {logs.length.toLocaleString()} log entries
+          Showing {filteredLogs.length.toLocaleString()} of {Array.isArray(logs) ? logs.length.toLocaleString() : '0'} log entries
         </div>
 
         <div className="flex items-center space-x-4">
