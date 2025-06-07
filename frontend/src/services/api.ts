@@ -134,30 +134,6 @@ class ApiService {
     }
   }
 
-  // Normalize API response to ensure consistent structure
-  private normalizeApiResponse<T>(response: any): ApiResponse<T> {
-    // If response already has the expected structure
-    if (response.data && (response.pagination !== undefined || response.message !== undefined)) {
-      return response;
-    }
-    
-    // If response is just the data array/object
-    if (Array.isArray(response) || (typeof response === 'object' && !response.data)) {
-      return {
-        data: response as T,
-        message: undefined,
-        pagination: undefined
-      };
-    }
-    
-    // Default case
-    return {
-      data: response.data || response as T,
-      message: response.message,
-      pagination: response.pagination
-    };
-  }
-
   async login(password: string): Promise<{ token: string; expiresAt: number }> {
     if (!password || password.trim().length === 0) {
       throw new Error('Password is required');
@@ -209,7 +185,7 @@ class ApiService {
     try {
       const response = await this.api.post('/keys', payload);
       this.invalidateCache('/keys');
-      return this.normalizeApiResponse<APIKey>(response.data);
+      return response.data;
     } catch (error) {
       throw this.handleError(error);
     }
@@ -225,18 +201,18 @@ class ApiService {
     
     if (useCache) {
       const cached = this.getCache(cacheKey);
-      if (cached) return this.normalizeApiResponse<APIKey[]>(cached);
+      if (cached) return cached;
     }
 
     try {
       const response = await this.api.get('/keys', { params });
-      const normalizedData = this.normalizeApiResponse<APIKey[]>(response.data);
+      const data = response.data;
       
       if (useCache) {
-        this.setCache(cacheKey, normalizedData);
+        this.setCache(cacheKey, data);
       }
       
-      return normalizedData;
+      return data;
     } catch (error) {
       throw this.handleError(error);
     }
@@ -249,14 +225,14 @@ class ApiService {
 
     const cacheKey = this.getCacheKey(`/keys/${id}`);
     const cached = this.getCache(cacheKey);
-    if (cached) return this.normalizeApiResponse<APIKey>(cached);
+    if (cached) return cached;
 
     try {
       const response = await this.api.get(`/keys/${id.trim()}`);
-      const normalizedData = this.normalizeApiResponse<APIKey>(response.data);
+      const data = response.data;
       
-      this.setCache(cacheKey, normalizedData);
-      return normalizedData;
+      this.setCache(cacheKey, data);
+      return data;
     } catch (error) {
       throw this.handleError(error);
     }
@@ -279,7 +255,7 @@ class ApiService {
       const response = await this.api.put(`/keys/${id.trim()}`, payload);
       this.invalidateCache('/keys');
       this.invalidateCache(`/keys/${id}`);
-      return this.normalizeApiResponse<APIKey>(response.data);
+      return response.data;
     } catch (error) {
       throw this.handleError(error);
     }
@@ -321,47 +297,19 @@ class ApiService {
     
     if (useCache) {
       const cached = this.getCache(cacheKey);
-      if (cached) return this.normalizeApiResponse<LogEntry[]>(cached);
+      if (cached) return cached;
     }
 
     try {
       const response = await this.api.get('/logs', { params });
-      console.log('Raw logs response:', response.data); // Debug log
-      
-      // Handle the specific case where logs might be structured differently
-      let logsData: LogEntry[] = [];
-      let pagination: any = undefined;
-      
-      if (response.data) {
-        if (Array.isArray(response.data.data)) {
-          // Structure: { data: LogEntry[], pagination: {...} }
-          logsData = response.data.data;
-          pagination = response.data.pagination;
-        } else if (Array.isArray(response.data)) {
-          // Structure: LogEntry[]
-          logsData = response.data;
-        } else {
-          // Fallback
-          logsData = [];
-          console.warn('Unexpected logs response structure:', response.data);
-        }
-      }
-      
-      const normalizedData: ApiResponse<LogEntry[]> = {
-        data: logsData,
-        pagination: pagination,
-        message: response.data.message
-      };
-      
-      console.log('Normalized logs data:', normalizedData); // Debug log
+      const data = response.data;
       
       if (useCache) {
-        this.setCache(cacheKey, normalizedData, 60000);
+        this.setCache(cacheKey, data, 60000);
       }
       
-      return normalizedData;
+      return data;
     } catch (error) {
-      console.error('Error fetching logs:', error);
       throw this.handleError(error);
     }
   }
