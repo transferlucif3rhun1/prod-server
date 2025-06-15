@@ -72,7 +72,7 @@ export interface AuthState {
 }
 
 export interface WSEvent {
-  type: 'key_created' | 'key_updated' | 'key_deleted' | 'log_entry' | 'system_update' | 'error';
+  type: 'key_created' | 'key_updated' | 'key_deleted' | 'log_entry' | 'system_update' | 'error' | 'pong' | 'ping';
   data?: any;
   changes?: string[];
 }
@@ -358,4 +358,10 @@ export interface ExportResponse {
   size: number;
   count: number;
   timestamp: string;
+}
+
+declare global {
+  interface Window {
+    gtag?: (...args: any[]) => void;
+  }
 }

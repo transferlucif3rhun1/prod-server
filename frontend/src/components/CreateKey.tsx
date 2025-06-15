@@ -7,6 +7,7 @@ import {
 import { CreateKeyRequest, APIKey } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
+import { copyToClipboard } from '../utils';
 import toast from 'react-hot-toast';
 
 interface FormData extends CreateKeyRequest {
@@ -94,15 +95,15 @@ const CreateKey: React.FC = () => {
     }
 
     if (formData.rpm < 0 || formData.rpm > 10000) {
-      newErrors.rpm = 'RPM must be between 0 and 10000';
+      newErrors.rpm = 'RPM must be between 0 and 10000 (0 = unlimited)';
     }
 
     if (formData.threadsLimit < 0 || formData.threadsLimit > 1000) {
-      newErrors.threadsLimit = 'Thread limit must be between 0 and 1000';
+      newErrors.threadsLimit = 'Thread limit must be between 0 and 1000 (0 = unlimited)';
     }
 
-    if (formData.totalRequests < 1) {
-      newErrors.totalRequests = 'Total requests must be at least 1';
+    if (formData.totalRequests < 0) {
+      newErrors.totalRequests = 'Total requests must be 0 or greater (0 = unlimited)';
     }
 
     if (!formData.expirationValue || parseInt(formData.expirationValue) < 1) {
@@ -128,7 +129,6 @@ const CreateKey: React.FC = () => {
         : {})
     }));
 
-    // Clear error when user starts typing
     if (errors[field]) {
       setErrors(prev => ({ ...prev, [field]: '' }));
     }
@@ -162,7 +162,6 @@ const CreateKey: React.FC = () => {
       addApiKey(response.data);
       toast.success('API key created successfully!');
       
-      // Reset only name and custom key
       setFormData(prev => ({
         ...prev,
         name: '',
@@ -176,12 +175,16 @@ const CreateKey: React.FC = () => {
     }
   };
 
-  const copyToClipboard = async (text: string) => {
+  const handleCopyToClipboard = async (text: string) => {
     try {
-      await navigator.clipboard.writeText(text);
-      setCopied(true);
-      toast.success('Copied to clipboard!');
-      setTimeout(() => setCopied(false), 2000);
+      const success = await copyToClipboard(text);
+      if (success) {
+        setCopied(true);
+        toast.success('Copied to clipboard!');
+        setTimeout(() => setCopied(false), 2000);
+      } else {
+        toast.error('Failed to copy to clipboard');
+      }
     } catch (error) {
       toast.error('Failed to copy to clipboard');
     }
@@ -207,6 +210,13 @@ const CreateKey: React.FC = () => {
   const getUnitDisplayName = (unit: string) => {
     const unitObj = expirationUnits.find(u => u.value === unit);
     return unitObj?.label || unit;
+  };
+
+  const formatValue = (value: number): string => {
+    if (value === 0) {
+      return 'Unlimited';
+    }
+    return value.toLocaleString();
   };
 
   return (
@@ -249,7 +259,7 @@ const CreateKey: React.FC = () => {
                     <motion.button
                       whileHover={{ scale: 1.05 }}
                       whileTap={{ scale: 0.95 }}
-                      onClick={() => copyToClipboard(createdKey.id)}
+                      onClick={() => handleCopyToClipboard(createdKey.id)}
                       className="px-4 py-3 bg-green-500 hover:bg-green-600 text-white rounded-lg transition-colors"
                     >
                       {copied ? <CheckCircle className="w-5 h-5" /> : <Copy className="w-5 h-5" />}
@@ -270,7 +280,6 @@ const CreateKey: React.FC = () => {
       </AnimatePresence>
 
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-8">
-        {/* Main Form */}
         <div className="xl:col-span-2 space-y-6">
           <motion.div
             initial={{ opacity: 0, x: -20 }}
@@ -303,7 +312,6 @@ const CreateKey: React.FC = () => {
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-8">
-              {/* Basic Information */}
               <div className="space-y-6">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                   <div>
@@ -354,7 +362,6 @@ const CreateKey: React.FC = () => {
                 </div>
               </div>
 
-              {/* Limits Configuration */}
               <div className="space-y-6">
                 <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Limits & Permissions</h3>
                 
@@ -376,6 +383,7 @@ const CreateKey: React.FC = () => {
                       min="0"
                       max="10000"
                     />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">0 = Unlimited</p>
                     {errors.rpm && (
                       <div className="flex items-center mt-2 text-red-500 text-sm">
                         <AlertCircle className="w-4 h-4 mr-1" />
@@ -401,6 +409,7 @@ const CreateKey: React.FC = () => {
                       min="0"
                       max="1000"
                     />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">0 = Unlimited</p>
                     {errors.threadsLimit && (
                       <div className="flex items-center mt-2 text-red-500 text-sm">
                         <AlertCircle className="w-4 h-4 mr-1" />
@@ -422,8 +431,9 @@ const CreateKey: React.FC = () => {
                           ? 'border-red-300 focus:border-red-500 focus:ring-red-200' 
                           : 'border-gray-200 dark:border-gray-600 focus:border-blue-500 focus:ring-blue-200'
                       }`}
-                      min="1"
+                      min="0"
                     />
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">0 = Unlimited</p>
                     {errors.totalRequests && (
                       <div className="flex items-center mt-2 text-red-500 text-sm">
                         <AlertCircle className="w-4 h-4 mr-1" />
@@ -434,7 +444,6 @@ const CreateKey: React.FC = () => {
                 </div>
               </div>
 
-              {/* Expiration */}
               <div className="space-y-4">
                 <label className="flex items-center text-sm font-semibold text-gray-700 dark:text-gray-300">
                   <Clock className="w-4 h-4 mr-2 text-green-500" />
@@ -495,9 +504,7 @@ const CreateKey: React.FC = () => {
           </motion.div>
         </div>
 
-        {/* Sidebar */}
         <div className="space-y-6">
-          {/* Presets */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -531,7 +538,6 @@ const CreateKey: React.FC = () => {
             </div>
           </motion.div>
 
-          {/* Preview */}
           <motion.div
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
@@ -552,18 +558,18 @@ const CreateKey: React.FC = () => {
               
               <div className="flex justify-between items-center py-2 border-b border-gray-100 dark:border-gray-700">
                 <span className="text-gray-600 dark:text-gray-400">RPM:</span>
-                <span className="font-medium text-gray-900 dark:text-white">{formData.rpm}</span>
+                <span className="font-medium text-gray-900 dark:text-white">{formatValue(formData.rpm)}</span>
               </div>
               
               <div className="flex justify-between items-center py-2 border-b border-gray-100 dark:border-gray-700">
                 <span className="text-gray-600 dark:text-gray-400">Threads:</span>
-                <span className="font-medium text-gray-900 dark:text-white">{formData.threadsLimit}</span>
+                <span className="font-medium text-gray-900 dark:text-white">{formatValue(formData.threadsLimit)}</span>
               </div>
               
               <div className="flex justify-between items-center py-2 border-b border-gray-100 dark:border-gray-700">
                 <span className="text-gray-600 dark:text-gray-400">Total Requests:</span>
                 <span className="font-medium text-gray-900 dark:text-white">
-                  {formData.totalRequests.toLocaleString()}
+                  {formatValue(formData.totalRequests)}
                 </span>
               </div>
               

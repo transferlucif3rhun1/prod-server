@@ -89,7 +89,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
 
         case 'system_update':
           if (event.data?.message) {
-            toast.info(event.data.message);
+            toast.success(event.data.message);
           }
           break;
 

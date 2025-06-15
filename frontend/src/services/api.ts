@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosError, AxiosRequestConfig } from 'axios';
+import axios, { AxiosInstance, AxiosError, AxiosRequestConfig, AxiosResponse } from 'axios';
 import { APIKey, CreateKeyRequest, UpdateKeyRequest, LogEntry, SystemStats, ApiResponse } from '../types';
 
 interface CacheItem {
@@ -21,6 +21,12 @@ interface CircuitBreakerState {
   state: 'closed' | 'open' | 'half-open';
   failureThreshold: number;
   recoveryTimeout: number;
+}
+
+interface ExtendedAxiosRequestConfig extends AxiosRequestConfig {
+  metadata?: {
+    startTime: number;
+  };
 }
 
 class ApiService {
@@ -59,15 +65,17 @@ class ApiService {
 
   private setupInterceptors(): void {
     this.api.interceptors.request.use(
-      (config) => {
+      (config: ExtendedAxiosRequestConfig) => {
         const token = localStorage.getItem('token');
         if (token) {
+          config.headers = config.headers || {};
           config.headers.Authorization = `Bearer ${token}`;
         }
 
         const cacheKey = this.getCacheKey(config.url || '', config.params);
         const cachedItem = this.getCache(cacheKey);
         if (cachedItem?.etag && config.method === 'get') {
+          config.headers = config.headers || {};
           config.headers['If-None-Match'] = cachedItem.etag;
         }
 
@@ -80,8 +88,9 @@ class ApiService {
     );
 
     this.api.interceptors.response.use(
-      (response) => {
-        const duration = new Date().getTime() - (response.config.metadata?.startTime || 0);
+      (response: AxiosResponse) => {
+        const config = response.config as ExtendedAxiosRequestConfig;
+        const duration = new Date().getTime() - (config.metadata?.startTime || 0);
         
         if (response.status === 304) {
           const cacheKey = this.getCacheKey(response.config.url || '', response.config.params);
@@ -113,17 +122,19 @@ class ApiService {
   }
 
   private setupNetworkMonitoring(): void {
-    window.addEventListener('online', () => {
-      this.networkStatus = 'online';
-      this.circuitBreaker.state = 'closed';
-      this.circuitBreaker.failures = 0;
-      console.log('Network connection restored');
-    });
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', () => {
+        this.networkStatus = 'online';
+        this.circuitBreaker.state = 'closed';
+        this.circuitBreaker.failures = 0;
+        console.log('Network connection restored');
+      });
 
-    window.addEventListener('offline', () => {
-      this.networkStatus = 'offline';
-      console.log('Network connection lost');
-    });
+      window.addEventListener('offline', () => {
+        this.networkStatus = 'offline';
+        console.log('Network connection lost');
+      });
+    }
   }
 
   private startHealthMonitoring(): void {
@@ -170,7 +181,7 @@ class ApiService {
   private handleAuthError(): void {
     localStorage.removeItem('token');
     this.clearCache();
-    if (!window.location.pathname.includes('/login')) {
+    if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
       window.location.href = '/login';
     }
   }

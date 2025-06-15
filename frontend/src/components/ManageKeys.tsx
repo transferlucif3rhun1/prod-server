@@ -27,6 +27,7 @@ import {
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
+import { copyToClipboard } from '../utils';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 
@@ -211,14 +212,18 @@ const ManageKeys: React.FC = () => {
     return value.toLocaleString();
   };
 
-  const copyToClipboard = async (text: string, keyId: string) => {
+  const handleCopyToClipboard = async (text: string, keyId: string) => {
     try {
-      await navigator.clipboard.writeText(text);
-      setCopyStates(prev => ({ ...prev, [keyId]: true }));
-      toast.success('API key copied to clipboard!');
-      setTimeout(() => {
-        setCopyStates(prev => ({ ...prev, [keyId]: false }));
-      }, 2000);
+      const success = await copyToClipboard(text);
+      if (success) {
+        setCopyStates(prev => ({ ...prev, [keyId]: true }));
+        toast.success('API key copied to clipboard!');
+        setTimeout(() => {
+          setCopyStates(prev => ({ ...prev, [keyId]: false }));
+        }, 2000);
+      } else {
+        toast.error('Failed to copy to clipboard. Please try selecting and copying manually.');
+      }
     } catch {
       toast.error('Failed to copy to clipboard. Please try selecting and copying manually.');
     }
@@ -528,430 +533,6 @@ const ManageKeys: React.FC = () => {
     );
   }
 
-  const renderTableView = () => (
-    <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700">
-      <div className="w-full">
-        <table className="w-full divide-y divide-gray-200 dark:divide-gray-700">
-          <thead className="bg-gray-50 dark:bg-gray-900">
-            <tr>
-              <th className="px-4 py-4 text-left w-12">
-                <input
-                  type="checkbox"
-                  checked={selectedKeys.size === paginatedKeys.length && paginatedKeys.length > 0}
-                  onChange={selectAll}
-                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                />
-              </th>
-              <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                Key Information
-              </th>
-              <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                Status
-              </th>
-              <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                Rate Limits
-              </th>
-              <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                Usage Progress
-              </th>
-              <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
-                Expiration
-              </th>
-              <th className="relative px-4 py-4 w-16">
-                <span className="sr-only">Actions</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-            <AnimatePresence>
-              {paginatedKeys.map((key, index) => {
-                const status = getKeyStatus(key);
-                const isSelected = selectedKeys.has(key.id);
-                const usagePercentage = calculateUsagePercentage(key.usageCount, key.totalRequests);
-                const isExpiringSoon = new Date(key.expiration).getTime() - Date.now() < 7 * 24 * 60 * 60 * 1000;
-                
-                return (
-                  <motion.tr
-                    key={key.id}
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -20 }}
-                    transition={{ delay: index * 0.05 }}
-                    className={`hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
-                      isSelected ? 'bg-blue-50 dark:bg-blue-900/20' : ''
-                    }`}
-                  >
-                    <td className="px-4 py-4">
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => toggleKeySelection(key.id)}
-                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                      />
-                    </td>
-                    <td className="px-4 py-4">
-                      <div className="space-y-2">
-                        <div className="flex items-center space-x-3">
-                          <span className="font-medium text-gray-900 dark:text-white">
-                            {key.name || 'Untitled Key'}
-                          </span>
-                          <motion.button
-                            whileHover={{ scale: 1.1 }}
-                            whileTap={{ scale: 0.9 }}
-                            onClick={() => copyToClipboard(key.id, key.id)}
-                            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                            title="Copy full API key"
-                          >
-                            {copyStates[key.id] ? (
-                              <CheckCircle className="w-4 h-4 text-green-500" />
-                            ) : (
-                              <Copy className="w-4 h-4" />
-                            )}
-                          </motion.button>
-                        </div>
-                        <code className="text-xs text-gray-500 font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
-                          {key.maskedKey || maskAPIKey(key.id)}
-                        </code>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4">
-                      <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
-                        {status === 'active' && <Activity className="w-3 h-3 mr-1" />}
-                        {status === 'expired' && <Clock className="w-3 h-3 mr-1" />}
-                        {status === 'inactive' && <X className="w-3 h-3 mr-1" />}
-                        {status.charAt(0).toUpperCase() + status.slice(1)}
-                      </span>
-                      {status === 'active' && isExpiringSoon && (
-                        <div className="text-xs text-yellow-600 dark:text-yellow-400 mt-1 flex items-center">
-                          <AlertTriangle className="w-3 h-3 mr-1" />
-                          Expires soon
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
-                      <div className="space-y-1">
-                        <div className="flex items-center space-x-1">
-                          {key.rpm === 0 ? (
-                            <Infinity className="w-3 h-3 text-blue-500" />
-                          ) : (
-                            <Zap className="w-3 h-3 text-yellow-500" />
-                          )}
-                          <span>{formatValue(key.rpm, 'rpm')} RPM</span>
-                        </div>
-                        <div className="flex items-center space-x-1">
-                          {key.threadsLimit === 0 ? (
-                            <Infinity className="w-3 h-3 text-blue-500" />
-                          ) : (
-                            <Users className="w-3 h-3 text-blue-500" />
-                          )}
-                          <span>{formatValue(key.threadsLimit, 'threads')} threads</span>
-                        </div>
-                      </div>
-                    </td>
-                    <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
-                      <div className="space-y-2">
-                        {(() => {
-                          const usage = formatUsageDisplay(key.usageCount, key.totalRequests);
-                          return (
-                            <>
-                              <div className="font-medium text-gray-900 dark:text-white">
-                                {usage.text}
-                              </div>
-                              <div className="text-xs text-gray-500 dark:text-gray-400">
-                                {usage.subtext}
-                              </div>
-                              {!usage.isUnlimited && usage.percentage !== null && (
-                                <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                                  <div 
-                                    className={`h-2 rounded-full transition-all duration-300 ${
-                                      usage.percentage >= 90 ? 'bg-red-500' :
-                                      usage.percentage >= 75 ? 'bg-yellow-500' :
-                                      'bg-blue-500'
-                                    }`}
-                                    style={{ width: `${usage.percentage}%` }}
-                                  ></div>
-                                </div>
-                              )}
-                              {usage.isUnlimited && (
-                                <div className="flex items-center text-xs text-blue-600 dark:text-blue-400">
-                                  <Infinity className="w-3 h-3 mr-1" />
-                                  No limits applied
-                                </div>
-                              )}
-                            </>
-                          );
-                        })()}
-                      </div>
-                    </td>
-                    <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
-                      <div className="flex items-center space-x-1">
-                        <Calendar className="w-3 h-3" />
-                        <span>{format(new Date(key.expiration), 'MMM dd, yyyy')}</span>
-                      </div>
-                      <div className="text-xs text-gray-400 mt-1">
-                        {format(new Date(key.expiration), 'HH:mm')}
-                      </div>
-                    </td>
-                    <td className="px-4 py-4 text-right text-sm font-medium">
-                      <div className="relative action-menu-container">
-                        <motion.button
-                          whileHover={{ scale: 1.1 }}
-                          whileTap={{ scale: 0.9 }}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setActionMenuKey(actionMenuKey === key.id ? null : key.id);
-                          }}
-                          className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-2"
-                        >
-                          <MoreVertical className="w-4 h-4" />
-                        </motion.button>
-
-                        <AnimatePresence>
-                          {actionMenuKey === key.id && (
-                            <motion.div
-                              initial={{ opacity: 0, scale: 0.95, y: -10 }}
-                              animate={{ opacity: 1, scale: 1, y: 0 }}
-                              exit={{ opacity: 0, scale: 0.95, y: -10 }}
-                              className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 z-50 py-2"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <button
-                                onClick={() => handleEdit(key)}
-                                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                              >
-                                <Edit3 className="w-4 h-4 mr-3" />
-                                Edit Key
-                              </button>
-                              <button
-                                onClick={() => copyToClipboard(key.id, key.id)}
-                                className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                              >
-                                <Copy className="w-4 h-4 mr-3" />
-                                Copy Full Key
-                              </button>
-                              <button
-                                onClick={() => handleDelete(key.id, key.name)}
-                                className="flex items-center w-full px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                              >
-                                <Trash2 className="w-4 h-4 mr-3" />
-                                Delete Key
-                              </button>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </div>
-                    </td>
-                  </motion.tr>
-                );
-              })}
-            </AnimatePresence>
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-
-  const renderCardView = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
-      <AnimatePresence>
-        {paginatedKeys.map((key, index) => {
-          const status = getKeyStatus(key);
-          const isSelected = selectedKeys.has(key.id);
-          const usagePercentage = calculateUsagePercentage(key.usageCount, key.totalRequests);
-          const isExpiringSoon = new Date(key.expiration).getTime() - Date.now() < 7 * 24 * 60 * 60 * 1000;
-          
-          return (
-            <motion.div
-              key={key.id}
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -20 }}
-              transition={{ delay: index * 0.05 }}
-              className={`bg-white dark:bg-gray-800 rounded-xl shadow-lg border-2 transition-all duration-200 hover:shadow-xl ${
-                isSelected ? 'border-blue-500 dark:border-blue-400' : 'border-gray-200 dark:border-gray-700'
-              }`}
-            >
-              <div className="p-4">
-                <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center space-x-3 flex-1 min-w-0">
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleKeySelection(key.id)}
-                      className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 flex-shrink-0"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center space-x-2 mb-1">
-                        <h3 className="font-semibold text-gray-900 dark:text-white truncate">
-                          {key.name || 'Untitled Key'}
-                        </h3>
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
-                          {status === 'active' && <Activity className="w-3 h-3 mr-1" />}
-                          {status === 'expired' && <Clock className="w-3 h-3 mr-1" />}
-                          {status === 'inactive' && <X className="w-3 h-3 mr-1" />}
-                          {status.charAt(0).toUpperCase() + status.slice(1)}
-                        </span>
-                        {status === 'active' && isExpiringSoon && (
-                          <span className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900/20 px-2 py-0.5 rounded flex items-center">
-                            <AlertTriangle className="w-3 h-3 mr-1" />
-                            Expires soon
-                          </span>
-                        )}
-                      </div>
-                      <code className="text-xs text-gray-500 font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
-                        {key.maskedKey || maskAPIKey(key.id)}
-                      </code>
-                    </div>
-                  </div>
-                  
-                  <div className="flex items-center space-x-1 flex-shrink-0">
-                    <motion.button
-                      whileHover={{ scale: 1.1 }}
-                      whileTap={{ scale: 0.9 }}
-                      onClick={() => copyToClipboard(key.id, key.id)}
-                      className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1"
-                      title="Copy full API key"
-                    >
-                      {copyStates[key.id] ? (
-                        <CheckCircle className="w-4 h-4 text-green-500" />
-                      ) : (
-                        <Copy className="w-4 h-4" />
-                      )}
-                    </motion.button>
-                    
-                    <div className="relative action-menu-container">
-                      <motion.button
-                        whileHover={{ scale: 1.1 }}
-                        whileTap={{ scale: 0.9 }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setActionMenuKey(actionMenuKey === key.id ? null : key.id);
-                        }}
-                        className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1"
-                      >
-                        <MoreVertical className="w-4 h-4" />
-                      </motion.button>
-
-                      <AnimatePresence>
-                        {actionMenuKey === key.id && (
-                          <motion.div
-                            initial={{ opacity: 0, scale: 0.95, y: -10 }}
-                            animate={{ opacity: 1, scale: 1, y: 0 }}
-                            exit={{ opacity: 0, scale: 0.95, y: -10 }}
-                            className="absolute right-0 top-8 w-48 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 z-50 py-2"
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <button
-                              onClick={() => handleEdit(key)}
-                              className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                            >
-                              <Edit3 className="w-4 h-4 mr-3" />
-                              Edit Key
-                            </button>
-                            <button
-                              onClick={() => copyToClipboard(key.id, key.id)}
-                              className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                            >
-                              <Copy className="w-4 h-4 mr-3" />
-                              Copy Full Key
-                            </button>
-                            <button
-                              onClick={() => handleDelete(key.id, key.name)}
-                              className="flex items-center w-full px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-                            >
-                              <Trash2 className="w-4 h-4 mr-3" />
-                              Delete Key
-                            </button>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-3 gap-3 mb-3 text-center">
-                  <div>
-                    <div className="flex items-center justify-center space-x-1 text-yellow-500 mb-1">
-                      {key.rpm === 0 ? (
-                        <Infinity className="w-3 h-3" />
-                      ) : (
-                        <Zap className="w-3 h-3" />
-                      )}
-                      <span className="text-xs font-medium">RPM</span>
-                    </div>
-                    <div className="text-sm font-semibold text-gray-900 dark:text-white">
-                      {formatValue(key.rpm, 'rpm')}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-center space-x-1 text-blue-500 mb-1">
-                      {key.threadsLimit === 0 ? (
-                        <Infinity className="w-3 h-3" />
-                      ) : (
-                        <Users className="w-3 h-3" />
-                      )}
-                      <span className="text-xs font-medium">Threads</span>
-                    </div>
-                    <div className="text-sm font-semibold text-gray-900 dark:text-white">
-                      {formatValue(key.threadsLimit, 'threads')}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="flex items-center justify-center space-x-1 text-gray-500 mb-1">
-                      <Calendar className="w-3 h-3" />
-                      <span className="text-xs font-medium">Expires</span>
-                    </div>
-                    <div className="text-xs font-medium text-gray-900 dark:text-white">
-                      {format(new Date(key.expiration), 'MMM dd')}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
-                  {(() => {
-                    const usage = formatUsageDisplay(key.usageCount, key.totalRequests);
-                    return (
-                      <>
-                        <div className="flex justify-between items-center mb-2">
-                          <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Usage</span>
-                          <span className="text-xs font-medium text-gray-900 dark:text-white">
-                            {usage.text}
-                          </span>
-                        </div>
-                        {!usage.isUnlimited && usage.percentage !== null ? (
-                          <>
-                            <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 mb-1">
-                              <div 
-                                className={`h-1.5 rounded-full transition-all duration-300 ${
-                                  usage.percentage >= 90 ? 'bg-red-500' :
-                                  usage.percentage >= 75 ? 'bg-yellow-500' :
-                                  'bg-blue-500'
-                                }`}
-                                style={{ width: `${usage.percentage}%` }}
-                              ></div>
-                            </div>
-                            <div className="text-xs text-gray-500 dark:text-gray-400 text-center">
-                              {usage.subtext}
-                            </div>
-                          </>
-                        ) : (
-                          <div className="flex items-center justify-center text-xs text-blue-600 dark:text-blue-400">
-                            <Infinity className="w-3 h-3 mr-1" />
-                            {usage.subtext}
-                          </div>
-                        )}
-                      </>
-                    );
-                  })()}
-                </div>
-              </div>
-            </motion.div>
-          );
-        })}
-      </AnimatePresence>
-    </div>
-  );
-
   return (
     <div className="space-y-6">
       <AnimatePresence>
@@ -1202,7 +783,427 @@ const ManageKeys: React.FC = () => {
       >
         {paginatedKeys.length > 0 ? (
           <>
-            {viewMode === 'table' ? renderTableView() : renderCardView()}
+            {viewMode === 'table' ? (
+              <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700">
+                <div className="w-full">
+                  <table className="w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-900">
+                      <tr>
+                        <th className="px-4 py-4 text-left w-12">
+                          <input
+                            type="checkbox"
+                            checked={selectedKeys.size === paginatedKeys.length && paginatedKeys.length > 0}
+                            onChange={selectAll}
+                            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                          />
+                        </th>
+                        <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                          Key Information
+                        </th>
+                        <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                          Status
+                        </th>
+                        <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                          Rate Limits
+                        </th>
+                        <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                          Usage Progress
+                        </th>
+                        <th className="px-4 py-4 text-left text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">
+                          Expiration
+                        </th>
+                        <th className="relative px-4 py-4 w-16">
+                          <span className="sr-only">Actions</span>
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                      <AnimatePresence>
+                        {paginatedKeys.map((key, index) => {
+                          const status = getKeyStatus(key);
+                          const isSelected = selectedKeys.has(key.id);
+                          const usagePercentage = calculateUsagePercentage(key.usageCount, key.totalRequests);
+                          const isExpiringSoon = new Date(key.expiration).getTime() - Date.now() < 7 * 24 * 60 * 60 * 1000;
+                          
+                          return (
+                            <motion.tr
+                              key={key.id}
+                              initial={{ opacity: 0, y: 20 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              exit={{ opacity: 0, y: -20 }}
+                              transition={{ delay: index * 0.05 }}
+                              className={`hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors ${
+                                isSelected ? 'bg-blue-50 dark:bg-blue-900/20' : ''
+                              }`}
+                            >
+                              <td className="px-4 py-4">
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  onChange={() => toggleKeySelection(key.id)}
+                                  className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                />
+                              </td>
+                              <td className="px-4 py-4">
+                                <div className="space-y-2">
+                                  <div className="flex items-center space-x-3">
+                                    <span className="font-medium text-gray-900 dark:text-white">
+                                      {key.name || 'Untitled Key'}
+                                    </span>
+                                    <motion.button
+                                      whileHover={{ scale: 1.1 }}
+                                      whileTap={{ scale: 0.9 }}
+                                      onClick={() => handleCopyToClipboard(key.id, key.id)}
+                                      className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
+                                      title="Copy full API key"
+                                    >
+                                      {copyStates[key.id] ? (
+                                        <CheckCircle className="w-4 h-4 text-green-500" />
+                                      ) : (
+                                        <Copy className="w-4 h-4" />
+                                      )}
+                                    </motion.button>
+                                  </div>
+                                  <code className="text-xs text-gray-500 font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
+                                    {key.maskedKey || maskAPIKey(key.id)}
+                                  </code>
+                                </div>
+                              </td>
+                              <td className="px-4 py-4">
+                                <span className={`inline-flex items-center px-3 py-1 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
+                                  {status === 'active' && <Activity className="w-3 h-3 mr-1" />}
+                                  {status === 'expired' && <Clock className="w-3 h-3 mr-1" />}
+                                  {status === 'inactive' && <X className="w-3 h-3 mr-1" />}
+                                  {status.charAt(0).toUpperCase() + status.slice(1)}
+                                </span>
+                                {status === 'active' && isExpiringSoon && (
+                                  <div className="text-xs text-yellow-600 dark:text-yellow-400 mt-1 flex items-center">
+                                    <AlertTriangle className="w-3 h-3 mr-1" />
+                                    Expires soon
+                                  </div>
+                                )}
+                              </td>
+                              <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
+                                <div className="space-y-1">
+                                  <div className="flex items-center space-x-1">
+                                    {key.rpm === 0 ? (
+                                      <Infinity className="w-3 h-3 text-blue-500" />
+                                    ) : (
+                                      <Zap className="w-3 h-3 text-yellow-500" />
+                                    )}
+                                    <span>{formatValue(key.rpm, 'rpm')} RPM</span>
+                                  </div>
+                                  <div className="flex items-center space-x-1">
+                                    {key.threadsLimit === 0 ? (
+                                      <Infinity className="w-3 h-3 text-blue-500" />
+                                    ) : (
+                                      <Users className="w-3 h-3 text-blue-500" />
+                                    )}
+                                    <span>{formatValue(key.threadsLimit, 'threads')} threads</span>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
+                                <div className="space-y-2">
+                                  {(() => {
+                                    const usage = formatUsageDisplay(key.usageCount, key.totalRequests);
+                                    return (
+                                      <>
+                                        <div className="font-medium text-gray-900 dark:text-white">
+                                          {usage.text}
+                                        </div>
+                                        <div className="text-xs text-gray-500 dark:text-gray-400">
+                                          {usage.subtext}
+                                        </div>
+                                        {!usage.isUnlimited && usage.percentage !== null && (
+                                          <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+                                            <div 
+                                              className={`h-2 rounded-full transition-all duration-300 ${
+                                                usage.percentage >= 90 ? 'bg-red-500' :
+                                                usage.percentage >= 75 ? 'bg-yellow-500' :
+                                                'bg-blue-500'
+                                              }`}
+                                              style={{ width: `${usage.percentage}%` }}
+                                            ></div>
+                                          </div>
+                                        )}
+                                        {usage.isUnlimited && (
+                                          <div className="flex items-center text-xs text-blue-600 dark:text-blue-400">
+                                            <Infinity className="w-3 h-3 mr-1" />
+                                            No limits applied
+                                          </div>
+                                        )}
+                                      </>
+                                    );
+                                  })()}
+                                </div>
+                              </td>
+                              <td className="px-4 py-4 text-sm text-gray-500 dark:text-gray-400">
+                                <div className="flex items-center space-x-1">
+                                  <Calendar className="w-3 h-3" />
+                                  <span>{format(new Date(key.expiration), 'MMM dd, yyyy')}</span>
+                                </div>
+                                <div className="text-xs text-gray-400 mt-1">
+                                  {format(new Date(key.expiration), 'HH:mm')}
+                                </div>
+                              </td>
+                              <td className="px-4 py-4 text-right text-sm font-medium">
+                                <div className="relative action-menu-container">
+                                  <motion.button
+                                    whileHover={{ scale: 1.1 }}
+                                    whileTap={{ scale: 0.9 }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setActionMenuKey(actionMenuKey === key.id ? null : key.id);
+                                    }}
+                                    className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-2"
+                                  >
+                                    <MoreVertical className="w-4 h-4" />
+                                  </motion.button>
+
+                                  <AnimatePresence>
+                                    {actionMenuKey === key.id && (
+                                      <motion.div
+                                        initial={{ opacity: 0, scale: 0.95, y: -10 }}
+                                        animate={{ opacity: 1, scale: 1, y: 0 }}
+                                        exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                                        className="absolute right-0 top-full mt-1 w-48 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 z-50 py-2"
+                                        onClick={(e) => e.stopPropagation()}
+                                      >
+                                        <button
+                                          onClick={() => handleEdit(key)}
+                                          className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                                        >
+                                          <Edit3 className="w-4 h-4 mr-3" />
+                                          Edit Key
+                                        </button>
+                                        <button
+                                          onClick={() => handleCopyToClipboard(key.id, key.id)}
+                                          className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                                        >
+                                          <Copy className="w-4 h-4 mr-3" />
+                                          Copy Full Key
+                                        </button>
+                                        <button
+                                          onClick={() => handleDelete(key.id, key.name)}
+                                          className="flex items-center w-full px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                                        >
+                                          <Trash2 className="w-4 h-4 mr-3" />
+                                          Delete Key
+                                        </button>
+                                      </motion.div>
+                                    )}
+                                  </AnimatePresence>
+                                </div>
+                              </td>
+                            </motion.tr>
+                          );
+                        })}
+                      </AnimatePresence>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+                <AnimatePresence>
+                  {paginatedKeys.map((key, index) => {
+                    const status = getKeyStatus(key);
+                    const isSelected = selectedKeys.has(key.id);
+                    const usagePercentage = calculateUsagePercentage(key.usageCount, key.totalRequests);
+                    const isExpiringSoon = new Date(key.expiration).getTime() - Date.now() < 7 * 24 * 60 * 60 * 1000;
+                    
+                    return (
+                      <motion.div
+                        key={key.id}
+                        initial={{ opacity: 0, y: 20 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -20 }}
+                        transition={{ delay: index * 0.05 }}
+                        className={`bg-white dark:bg-gray-800 rounded-xl shadow-lg border-2 transition-all duration-200 hover:shadow-xl ${
+                          isSelected ? 'border-blue-500 dark:border-blue-400' : 'border-gray-200 dark:border-gray-700'
+                        }`}
+                      >
+                        <div className="p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center space-x-3 flex-1 min-w-0">
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleKeySelection(key.id)}
+                                className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 flex-shrink-0"
+                              />
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center space-x-2 mb-1">
+                                  <h3 className="font-semibold text-gray-900 dark:text-white truncate">
+                                    {key.name || 'Untitled Key'}
+                                  </h3>
+                                  <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${getStatusColor(status)}`}>
+                                    {status === 'active' && <Activity className="w-3 h-3 mr-1" />}
+                                    {status === 'expired' && <Clock className="w-3 h-3 mr-1" />}
+                                    {status === 'inactive' && <X className="w-3 h-3 mr-1" />}
+                                    {status.charAt(0).toUpperCase() + status.slice(1)}
+                                  </span>
+                                  {status === 'active' && isExpiringSoon && (
+                                    <span className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900/20 px-2 py-0.5 rounded flex items-center">
+                                      <AlertTriangle className="w-3 h-3 mr-1" />
+                                      Expires soon
+                                    </span>
+                                  )}
+                                </div>
+                                <code className="text-xs text-gray-500 font-mono bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
+                                  {key.maskedKey || maskAPIKey(key.id)}
+                                </code>
+                              </div>
+                            </div>
+                            
+                            <div className="flex items-center space-x-1 flex-shrink-0">
+                              <motion.button
+                                whileHover={{ scale: 1.1 }}
+                                whileTap={{ scale: 0.9 }}
+                                onClick={() => handleCopyToClipboard(key.id, key.id)}
+                                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1"
+                                title="Copy full API key"
+                              >
+                                {copyStates[key.id] ? (
+                                  <CheckCircle className="w-4 h-4 text-green-500" />
+                                ) : (
+                                  <Copy className="w-4 h-4" />
+                                )}
+                              </motion.button>
+                              
+                              <div className="relative action-menu-container">
+                                <motion.button
+                                  whileHover={{ scale: 1.1 }}
+                                  whileTap={{ scale: 0.9 }}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActionMenuKey(actionMenuKey === key.id ? null : key.id);
+                                  }}
+                                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors p-1"
+                                >
+                                  <MoreVertical className="w-4 h-4" />
+                                </motion.button>
+
+                                <AnimatePresence>
+                                  {actionMenuKey === key.id && (
+                                    <motion.div
+                                      initial={{ opacity: 0, scale: 0.95, y: -10 }}
+                                      animate={{ opacity: 1, scale: 1, y: 0 }}
+                                      exit={{ opacity: 0, scale: 0.95, y: -10 }}
+                                      className="absolute right-0 top-8 w-48 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 z-50 py-2"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <button
+                                        onClick={() => handleEdit(key)}
+                                        className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                                      >
+                                        <Edit3 className="w-4 h-4 mr-3" />
+                                        Edit Key
+                                      </button>
+                                      <button
+                                        onClick={() => handleCopyToClipboard(key.id, key.id)}
+                                        className="flex items-center w-full px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                                      >
+                                        <Copy className="w-4 h-4 mr-3" />
+                                        Copy Full Key
+                                      </button>
+                                      <button
+                                        onClick={() => handleDelete(key.id, key.name)}
+                                        className="flex items-center w-full px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+                                      >
+                                        <Trash2 className="w-4 h-4 mr-3" />
+                                        Delete Key
+                                      </button>
+                                    </motion.div>
+                                  )}
+                                </AnimatePresence>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="grid grid-cols-3 gap-3 mb-3 text-center">
+                            <div>
+                              <div className="flex items-center justify-center space-x-1 text-yellow-500 mb-1">
+                                {key.rpm === 0 ? (
+                                  <Infinity className="w-3 h-3" />
+                                ) : (
+                                  <Zap className="w-3 h-3" />
+                                )}
+                                <span className="text-xs font-medium">RPM</span>
+                              </div>
+                              <div className="text-sm font-semibold text-gray-900 dark:text-white">
+                                {formatValue(key.rpm, 'rpm')}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex items-center justify-center space-x-1 text-blue-500 mb-1">
+                                {key.threadsLimit === 0 ? (
+                                  <Infinity className="w-3 h-3" />
+                                ) : (
+                                  <Users className="w-3 h-3" />
+                                )}
+                                <span className="text-xs font-medium">Threads</span>
+                              </div>
+                              <div className="text-sm font-semibold text-gray-900 dark:text-white">
+                                {formatValue(key.threadsLimit, 'threads')}
+                              </div>
+                            </div>
+                            <div>
+                              <div className="flex items-center justify-center space-x-1 text-gray-500 mb-1">
+                                <Calendar className="w-3 h-3" />
+                                <span className="text-xs font-medium">Expires</span>
+                              </div>
+                              <div className="text-xs font-medium text-gray-900 dark:text-white">
+                                {format(new Date(key.expiration), 'MMM dd')}
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
+                            {(() => {
+                              const usage = formatUsageDisplay(key.usageCount, key.totalRequests);
+                              return (
+                                <>
+                                  <div className="flex justify-between items-center mb-2">
+                                    <span className="text-xs font-medium text-gray-600 dark:text-gray-400">Usage</span>
+                                    <span className="text-xs font-medium text-gray-900 dark:text-white">
+                                      {usage.text}
+                                    </span>
+                                  </div>
+                                  {!usage.isUnlimited && usage.percentage !== null ? (
+                                    <>
+                                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-1.5 mb-1">
+                                        <div 
+                                          className={`h-1.5 rounded-full transition-all duration-300 ${
+                                            usage.percentage >= 90 ? 'bg-red-500' :
+                                            usage.percentage >= 75 ? 'bg-yellow-500' :
+                                            'bg-blue-500'
+                                          }`}
+                                          style={{ width: `${usage.percentage}%` }}
+                                        ></div>
+                                      </div>
+                                      <div className="text-xs text-gray-500 dark:text-gray-400 text-center">
+                                        {usage.subtext}
+                                      </div>
+                                    </>
+                                  ) : (
+                                    <div className="flex items-center justify-center text-xs text-blue-600 dark:text-blue-400">
+                                      <Infinity className="w-3 h-3 mr-1" />
+                                      {usage.subtext}
+                                    </div>
+                                  )}
+                                </>
+                              );
+                            })()}
+                          </div>
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </AnimatePresence>
+              </div>
+            )}
 
             {totalPages > 1 && (
               <div className="flex items-center justify-between mt-6">

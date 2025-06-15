@@ -66,12 +66,6 @@ const App: React.FC = () => {
             });
           }
           break;
-        case 'maintenance_mode':
-          toast.error('System is entering maintenance mode. Please save your work.', {
-            duration: 0,
-            id: 'maintenance'
-          });
-          break;
         default:
           break;
       }
@@ -85,6 +79,8 @@ const App: React.FC = () => {
   useEffect(() => {
     const initializeTheme = () => {
       try {
+        if (typeof window === 'undefined') return;
+        
         const storedTheme = localStorage.getItem('theme');
         const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
         
@@ -100,19 +96,21 @@ const App: React.FC = () => {
 
     initializeTheme();
 
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-    const handleThemeChange = (e: MediaQueryListEvent) => {
-      if (!localStorage.getItem('theme')) {
-        if (e.matches) {
-          document.documentElement.classList.add('dark');
-        } else {
-          document.documentElement.classList.remove('dark');
+    if (typeof window !== 'undefined') {
+      const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+      const handleThemeChange = (e: MediaQueryListEvent) => {
+        if (!localStorage.getItem('theme')) {
+          if (e.matches) {
+            document.documentElement.classList.add('dark');
+          } else {
+            document.documentElement.classList.remove('dark');
+          }
         }
-      }
-    };
+      };
 
-    mediaQuery.addEventListener('change', handleThemeChange);
-    return () => mediaQuery.removeEventListener('change', handleThemeChange);
+      mediaQuery.addEventListener('change', handleThemeChange);
+      return () => mediaQuery.removeEventListener('change', handleThemeChange);
+    }
   }, []);
 
   useEffect(() => {
@@ -188,6 +186,8 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return;
+
     const handleOnline = () => {
       updateConnectionStatus({ api: true });
       toast.success('Connection restored', { id: 'network-status' });
@@ -221,21 +221,23 @@ const App: React.FC = () => {
       componentStack: errorInfo.componentStack,
       timestamp: new Date().toISOString(),
       pathname: location.pathname,
-      userAgent: navigator.userAgent
+      userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown'
     };
 
     try {
-      const existingErrors = JSON.parse(localStorage.getItem('app_errors') || '[]');
-      existingErrors.push(errorData);
-      
-      const recentErrors = existingErrors.slice(-10);
-      localStorage.setItem('app_errors', JSON.stringify(recentErrors));
+      if (typeof localStorage !== 'undefined') {
+        const existingErrors = JSON.parse(localStorage.getItem('app_errors') || '[]');
+        existingErrors.push(errorData);
+        
+        const recentErrors = existingErrors.slice(-10);
+        localStorage.setItem('app_errors', JSON.stringify(recentErrors));
+      }
     } catch (storageError) {
       console.error('Failed to store error data:', storageError);
     }
 
-    if (window.gtag) {
-      window.gtag('event', 'exception', {
+    if (typeof window !== 'undefined' && (window as any).gtag) {
+      (window as any).gtag('event', 'exception', {
         description: error.message,
         fatal: true
       });
@@ -321,7 +323,7 @@ const App: React.FC = () => {
         </Suspense>
 
         <AnimatePresence>
-          {!navigator.onLine && (
+          {typeof navigator !== 'undefined' && !navigator.onLine && (
             <motion.div
               initial={{ y: -100, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
