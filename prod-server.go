@@ -7,10 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -20,7 +22,6 @@ import (
 	"time"
 
 	"github.com/gin-contrib/cors"
-	"github.com/gin-contrib/secure"
 	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
@@ -50,7 +51,9 @@ type Config struct {
 	AdminPassword     string `json:"adminPassword" validate:"required,min=8"`
 	MaxRetries        int    `json:"maxRetries" validate:"min=1,max=10"`
 	RetryDelay        int    `json:"retryDelay" validate:"min=100,max=5000"`
-	RateLimit         int    `json:"rateLimit" validate:"min=1,max=10000"`
+	LogDir            string `json:"logDir"`
+	MaxLogSize        int64  `json:"maxLogSize"`
+	MaxLogFiles       int    `json:"maxLogFiles"`
 }
 
 type APIKey struct {
@@ -91,18 +94,6 @@ type LogEntry struct {
 	Timestamp time.Time          `bson:"timestamp" json:"timestamp"`
 	Metadata  bson.M             `bson:"metadata,omitempty" json:"metadata,omitempty"`
 	UserID    string             `bson:"userId,omitempty" json:"userId,omitempty"`
-}
-
-type SystemStats struct {
-	TotalKeys     int64   `json:"totalKeys"`
-	ActiveKeys    int64   `json:"activeKeys"`
-	ExpiredKeys   int64   `json:"expiredKeys"`
-	TotalRequests int64   `json:"totalRequests"`
-	Uptime        int64   `json:"uptime"`
-	MemoryUsage   int64   `json:"memoryUsage"`
-	GoRoutines    int     `json:"goRoutines"`
-	MongoStatus   bool    `json:"mongoStatus"`
-	CacheHitRate  float64 `json:"cacheHitRate"`
 }
 
 type CreateKeyRequest struct {
@@ -162,10 +153,14 @@ type ErrorResponse struct {
 	RequestID string    `json:"requestId,omitempty"`
 }
 
+type CacheMetrics struct {
+	hits   int64
+	misses int64
+}
+
 type Cache struct {
+	metrics     CacheMetrics
 	keyToAPIKey sync.Map
-	hits        int64
-	misses      int64
 	lastCleanup time.Time
 	mutex       sync.RWMutex
 }
@@ -173,10 +168,10 @@ type Cache struct {
 func (c *Cache) GetAPIKey(key string) (*APIKey, bool) {
 	value, exists := c.keyToAPIKey.Load(key)
 	if !exists {
-		atomic.AddInt64(&c.misses, 1)
+		atomic.AddInt64(&c.metrics.misses, 1)
 		return nil, false
 	}
-	atomic.AddInt64(&c.hits, 1)
+	atomic.AddInt64(&c.metrics.hits, 1)
 	if apiKey, ok := value.(*APIKey); ok {
 		return apiKey, true
 	}
@@ -192,8 +187,8 @@ func (c *Cache) DeleteAPIKey(key string) {
 }
 
 func (c *Cache) GetHitRate() float64 {
-	hits := atomic.LoadInt64(&c.hits)
-	misses := atomic.LoadInt64(&c.misses)
+	hits := atomic.LoadInt64(&c.metrics.hits)
+	misses := atomic.LoadInt64(&c.metrics.misses)
 	total := hits + misses
 	if total == 0 {
 		return 0
@@ -226,63 +221,177 @@ func (c *Cache) Clear() {
 		c.keyToAPIKey.Delete(key)
 		return true
 	})
-	atomic.StoreInt64(&c.hits, 0)
-	atomic.StoreInt64(&c.misses, 0)
+	atomic.StoreInt64(&c.metrics.hits, 0)
+	atomic.StoreInt64(&c.metrics.misses, 0)
 }
 
-type RateLimiter struct {
-	clients map[string]*ClientBucket
-	mutex   sync.RWMutex
+type FileLogger struct {
+	logFile     *os.File
+	currentSize int64
+	maxSize     int64
+	maxFiles    int
+	logDir      string
+	mu          sync.Mutex
 }
 
-type ClientBucket struct {
-	tokens     int
-	lastRefill time.Time
-	mutex      sync.Mutex
-}
-
-func NewRateLimiter() *RateLimiter {
-	return &RateLimiter{
-		clients: make(map[string]*ClientBucket),
+func NewFileLogger(logDir string, maxSize int64, maxFiles int) (*FileLogger, error) {
+	if logDir == "" {
+		logDir = "logs"
 	}
+	if maxSize == 0 {
+		maxSize = 10 * 1024 * 1024
+	}
+	if maxFiles == 0 {
+		maxFiles = 5
+	}
+
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	fl := &FileLogger{
+		maxSize:  maxSize,
+		maxFiles: maxFiles,
+		logDir:   logDir,
+	}
+
+	if err := fl.openLogFile(); err != nil {
+		return nil, fmt.Errorf("failed to open log file: %w", err)
+	}
+
+	go fl.cleanupRoutine()
+	return fl, nil
 }
 
-func (rl *RateLimiter) Allow(clientIP string, limit int) bool {
-	rl.mutex.RLock()
-	bucket, exists := rl.clients[clientIP]
-	rl.mutex.RUnlock()
+func (fl *FileLogger) openLogFile() error {
+	filename := filepath.Join(fl.logDir, fmt.Sprintf("app_%s.log", time.Now().Format("2006-01-02")))
 
-	if !exists {
-		rl.mutex.Lock()
-		bucket = &ClientBucket{
-			tokens:     limit,
-			lastRefill: time.Now(),
+	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+
+	if fl.logFile != nil {
+		fl.logFile.Close()
+	}
+
+	fl.logFile = file
+
+	if stat, err := file.Stat(); err == nil {
+		fl.currentSize = stat.Size()
+	}
+
+	return nil
+}
+
+func (fl *FileLogger) Write(p []byte) (n int, err error) {
+	fl.mu.Lock()
+	defer fl.mu.Unlock()
+
+	if fl.currentSize+int64(len(p)) > fl.maxSize {
+		if err := fl.rotateLog(); err != nil {
+			return 0, err
 		}
-		rl.clients[clientIP] = bucket
-		rl.mutex.Unlock()
 	}
 
-	bucket.mutex.Lock()
-	defer bucket.mutex.Unlock()
-
-	now := time.Now()
-	elapsed := now.Sub(bucket.lastRefill)
-	tokensToAdd := int(elapsed.Seconds())
-	bucket.tokens = min(limit, bucket.tokens+tokensToAdd)
-	bucket.lastRefill = now
-
-	if bucket.tokens > 0 {
-		bucket.tokens--
-		return true
+	n, err = fl.logFile.Write(p)
+	if err == nil {
+		fl.currentSize += int64(n)
 	}
-	return false
+	return
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+func (fl *FileLogger) rotateLog() error {
+	fl.logFile.Close()
+
+	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	oldName := fl.logFile.Name()
+	newName := strings.Replace(oldName, ".log", fmt.Sprintf("_%s.log", timestamp), 1)
+
+	if err := os.Rename(oldName, newName); err != nil {
+		return err
 	}
-	return b
+
+	fl.currentSize = 0
+	return fl.openLogFile()
+}
+
+func (fl *FileLogger) cleanupRoutine() {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		fl.cleanup()
+	}
+}
+
+func (fl *FileLogger) cleanup() {
+	files, err := filepath.Glob(filepath.Join(fl.logDir, "*.log"))
+	if err != nil {
+		return
+	}
+
+	if len(files) <= fl.maxFiles {
+		return
+	}
+
+	type fileInfo struct {
+		path    string
+		modTime time.Time
+	}
+
+	var fileInfos []fileInfo
+	for _, file := range files {
+		if stat, err := os.Stat(file); err == nil {
+			fileInfos = append(fileInfos, fileInfo{file, stat.ModTime()})
+		}
+	}
+
+	if len(fileInfos) <= fl.maxFiles {
+		return
+	}
+
+	for i := 0; i < len(fileInfos)-1; i++ {
+		for j := i + 1; j < len(fileInfos); j++ {
+			if fileInfos[i].modTime.After(fileInfos[j].modTime) {
+				fileInfos[i], fileInfos[j] = fileInfos[j], fileInfos[i]
+			}
+		}
+	}
+
+	for i := 0; i < len(fileInfos)-fl.maxFiles; i++ {
+		os.Remove(fileInfos[i].path)
+	}
+}
+
+func (fl *FileLogger) Close() error {
+	fl.mu.Lock()
+	defer fl.mu.Unlock()
+	if fl.logFile != nil {
+		return fl.logFile.Close()
+	}
+	return nil
+}
+
+type WSClient struct {
+	conn     *websocket.Conn
+	clientID string
+	lastPing time.Time
+	mutex    sync.Mutex
+}
+
+func (wsc *WSClient) Send(message WSMessage) error {
+	wsc.mutex.Lock()
+	defer wsc.mutex.Unlock()
+
+	wsc.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	return wsc.conn.WriteJSON(message)
+}
+
+func (wsc *WSClient) Close() error {
+	wsc.mutex.Lock()
+	defer wsc.mutex.Unlock()
+	return wsc.conn.Close()
 }
 
 type APIKeyManager struct {
@@ -299,44 +408,19 @@ type APIKeyManager struct {
 	shutdownOnce      sync.Once
 	ctx               context.Context
 	cancel            context.CancelFunc
-	mongoConnected    bool
-	mongoMutex        sync.RWMutex
-	rateLimiter       *RateLimiter
-	logger            *Logger
-}
-
-type Logger struct {
-	mu sync.Mutex
-}
-
-func (l *Logger) Info(message string, fields ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	log.Printf("[INFO] %s %v", message, fields)
-}
-
-func (l *Logger) Error(message string, fields ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	log.Printf("[ERROR] %s %v", message, fields)
-}
-
-func (l *Logger) Warn(message string, fields ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	log.Printf("[WARN] %s %v", message, fields)
-}
-
-func (l *Logger) Debug(message string, fields ...interface{}) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	log.Printf("[DEBUG] %s %v", message, fields)
+	mongoConnected    int32
+	fileLogger        *FileLogger
 }
 
 func NewAPIKeyManager(config *Config) (*APIKeyManager, error) {
 	v := validator.New()
 	if err := v.Struct(config); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	fileLogger, err := NewFileLogger(config.LogDir, config.MaxLogSize, config.MaxLogFiles)
+	if err != nil {
+		log.Printf("Warning: Failed to initialize file logger: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -353,11 +437,10 @@ func NewAPIKeyManager(config *Config) (*APIKeyManager, error) {
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
 		},
-		eventChan:   make(chan WSMessage, 1000),
-		ctx:         ctx,
-		cancel:      cancel,
-		rateLimiter: NewRateLimiter(),
-		logger:      &Logger{},
+		eventChan:  make(chan WSMessage, 1000),
+		ctx:        ctx,
+		cancel:     cancel,
+		fileLogger: fileLogger,
 	}
 
 	return manager, nil
@@ -377,7 +460,9 @@ func loadConfig(filePath string) (*Config, error) {
 		AdminPassword:     "admin123",
 		MaxRetries:        3,
 		RetryDelay:        1000,
-		RateLimit:         100,
+		LogDir:            "logs",
+		MaxLogSize:        10 * 1024 * 1024,
+		MaxLogFiles:       5,
 	}
 
 	if _, err := os.Stat(filePath); os.IsNotExist(err) {
@@ -404,8 +489,42 @@ func generateSecureKey(length int) string {
 	return key
 }
 
+func (m *APIKeyManager) logToFile(level, message string, fields ...interface{}) {
+	if m.fileLogger == nil {
+		return
+	}
+
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logLine := fmt.Sprintf("[%s] %s: %s", timestamp, level, message)
+
+	if len(fields) > 0 {
+		logLine += fmt.Sprintf(" %v", fields)
+	}
+
+	logLine += "\n"
+	m.fileLogger.Write([]byte(logLine))
+}
+
+func (m *APIKeyManager) Info(message string, fields ...interface{}) {
+	m.logToFile("INFO", message, fields...)
+}
+
+func (m *APIKeyManager) Error(message string, fields ...interface{}) {
+	log.Printf("[ERROR] %s %v", message, fields)
+	m.logToFile("ERROR", message, fields...)
+}
+
+func (m *APIKeyManager) Warn(message string, fields ...interface{}) {
+	log.Printf("[WARN] %s %v", message, fields)
+	m.logToFile("WARN", message, fields...)
+}
+
+func (m *APIKeyManager) Debug(message string, fields ...interface{}) {
+	m.logToFile("DEBUG", message, fields...)
+}
+
 func (m *APIKeyManager) connectMongo() error {
-	m.logger.Info("Connecting to MongoDB", "uri", m.config.MongoURI)
+	m.Info("Connecting to MongoDB", "uri", m.config.MongoURI)
 
 	clientOptions := options.Client().
 		ApplyURI(m.config.MongoURI).
@@ -439,11 +558,11 @@ func (m *APIKeyManager) connectMongo() error {
 	m.logsCollection = m.mongoClient.Database(m.config.DatabaseName).Collection(m.config.LogsCollection)
 
 	if err := m.createIndexes(); err != nil {
-		m.logger.Warn("Failed to create indexes", "error", err)
+		m.Warn("Failed to create indexes", "error", err)
 	}
 
 	m.setMongoStatus(true)
-	m.logger.Info("Successfully connected to MongoDB")
+	m.Info("Successfully connected to MongoDB")
 	return nil
 }
 
@@ -452,36 +571,22 @@ func (m *APIKeyManager) createIndexes() error {
 	defer cancel()
 
 	keysIndexes := []mongo.IndexModel{
-		{
-			Keys: bson.D{{Key: "isActive", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "expiration", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "createdAt", Value: -1}},
-		},
+		{Keys: bson.D{{Key: "isActive", Value: 1}}},
+		{Keys: bson.D{{Key: "expiration", Value: 1}}},
+		{Keys: bson.D{{Key: "createdAt", Value: -1}}},
 	}
 
-	_, err := m.apiKeysCollection.Indexes().CreateMany(ctx, keysIndexes)
-	if err != nil {
+	if _, err := m.apiKeysCollection.Indexes().CreateMany(ctx, keysIndexes); err != nil {
 		return fmt.Errorf("failed to create keys indexes: %w", err)
 	}
 
 	logsIndexes := []mongo.IndexModel{
-		{
-			Keys: bson.D{{Key: "timestamp", Value: -1}},
-		},
-		{
-			Keys: bson.D{{Key: "level", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "component", Value: 1}},
-		},
+		{Keys: bson.D{{Key: "timestamp", Value: -1}}},
+		{Keys: bson.D{{Key: "level", Value: 1}}},
+		{Keys: bson.D{{Key: "component", Value: 1}}},
 	}
 
-	_, err = m.logsCollection.Indexes().CreateMany(ctx, logsIndexes)
-	if err != nil {
+	if _, err := m.logsCollection.Indexes().CreateMany(ctx, logsIndexes); err != nil {
 		return fmt.Errorf("failed to create logs indexes: %w", err)
 	}
 
@@ -489,15 +594,15 @@ func (m *APIKeyManager) createIndexes() error {
 }
 
 func (m *APIKeyManager) setMongoStatus(connected bool) {
-	m.mongoMutex.Lock()
-	defer m.mongoMutex.Unlock()
-	m.mongoConnected = connected
+	if connected {
+		atomic.StoreInt32(&m.mongoConnected, 1)
+	} else {
+		atomic.StoreInt32(&m.mongoConnected, 0)
+	}
 }
 
 func (m *APIKeyManager) isMongoConnected() bool {
-	m.mongoMutex.RLock()
-	defer m.mongoMutex.RUnlock()
-	return m.mongoConnected
+	return atomic.LoadInt32(&m.mongoConnected) == 1
 }
 
 func (m *APIKeyManager) ensureMongoConnection() error {
@@ -534,7 +639,7 @@ func (m *APIKeyManager) loadAPIKeysToCache() error {
 	for cursor.Next(ctx) {
 		var key APIKey
 		if err := cursor.Decode(&key); err != nil {
-			m.logger.Warn("Failed to decode API key", "error", err)
+			m.Warn("Failed to decode API key", "error", err)
 			continue
 		}
 		m.cache.SetAPIKey(&key)
@@ -545,7 +650,7 @@ func (m *APIKeyManager) loadAPIKeysToCache() error {
 		return fmt.Errorf("cursor error: %w", err)
 	}
 
-	m.logger.Info("Loaded API keys to cache", "count", count)
+	m.Info("Loaded API keys to cache", "count", count)
 	return nil
 }
 
@@ -745,34 +850,22 @@ func generateRequestID() string {
 	return id
 }
 
-func (m *APIKeyManager) rateLimitMiddleware() gin.HandlerFunc {
+func (m *APIKeyManager) validationMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !m.rateLimiter.Allow(c.ClientIP(), m.config.RateLimit) {
-			c.JSON(http.StatusTooManyRequests, ErrorResponse{
-				Error:     "Rate limit exceeded",
-				Code:      "RATE_LIMIT_EXCEEDED",
-				Timestamp: time.Now().UTC(),
-				RequestID: generateRequestID(),
-			})
-			c.Abort()
-			return
+		if c.Request.Method == "POST" || c.Request.Method == "PUT" {
+			contentType := c.GetHeader("Content-Type")
+			if !strings.Contains(contentType, "application/json") {
+				m.respondWithError(c, http.StatusBadRequest, "Content-Type must be application/json", "INVALID_CONTENT_TYPE", nil)
+				return
+			}
+
+			if c.Request.ContentLength > 1024*1024 {
+				m.respondWithError(c, http.StatusRequestEntityTooLarge, "Request body too large", "BODY_TOO_LARGE", nil)
+				return
+			}
 		}
 		c.Next()
 	}
-}
-
-func (m *APIKeyManager) securityMiddleware() gin.HandlerFunc {
-	return secure.New(secure.Config{
-		AllowedHosts:          []string{},
-		SSLRedirect:           false,
-		STSSeconds:            31536000,
-		STSIncludeSubdomains:  true,
-		FrameDeny:             true,
-		ContentTypeNosniff:    true,
-		BrowserXssFilter:      true,
-		ContentSecurityPolicy: "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'",
-		ReferrerPolicy:        "strict-origin-when-cross-origin",
-	})
 }
 
 func (m *APIKeyManager) corsMiddleware() gin.HandlerFunc {
@@ -797,15 +890,22 @@ func (m *APIKeyManager) requestIDMiddleware() gin.HandlerFunc {
 }
 
 func (m *APIKeyManager) loggingMiddleware() gin.HandlerFunc {
-	return gin.LoggerWithFormatter(func(param gin.LogFormatterParams) string {
-		return fmt.Sprintf("[%s] %s %s %d %s %s\n",
-			param.TimeStamp.Format(time.RFC3339),
-			param.ClientIP,
-			param.Method,
-			param.StatusCode,
-			param.Path,
-			param.Latency,
-		)
+	return gin.LoggerWithConfig(gin.LoggerConfig{
+		Output: io.Discard,
+		Formatter: func(param gin.LogFormatterParams) string {
+			if param.StatusCode >= 400 {
+				log.Printf("[%d] %s %s %v", param.StatusCode, param.Method, param.Path, param.Latency)
+			}
+
+			m.Info("Request",
+				"method", param.Method,
+				"path", param.Path,
+				"status", param.StatusCode,
+				"latency", param.Latency,
+				"ip", param.ClientIP,
+			)
+			return ""
+		},
 	})
 }
 
@@ -857,7 +957,7 @@ func (m *APIKeyManager) respondWithError(c *gin.Context, statusCode int, message
 
 	if err != nil {
 		response.Details = err.Error()
-		m.logger.Error("Request error", "error", err, "requestId", requestID, "path", c.Request.URL.Path)
+		m.Error("Request error", "error", err, "requestId", requestID, "path", c.Request.URL.Path)
 	}
 
 	c.JSON(statusCode, response)
@@ -885,10 +985,10 @@ func (m *APIKeyManager) loginHandler(c *gin.Context) {
 		return
 	}
 
-	m.logger.Info("Login attempt", "ip", c.ClientIP())
+	m.Info("Login attempt", "ip", c.ClientIP())
 
 	if req.Password != m.config.AdminPassword {
-		m.logger.Warn("Failed login attempt", "ip", c.ClientIP())
+		m.Warn("Failed login attempt", "ip", c.ClientIP())
 		m.respondWithError(c, http.StatusUnauthorized, "Invalid password", "AUTH_FAILED", nil)
 		return
 	}
@@ -904,12 +1004,12 @@ func (m *APIKeyManager) loginHandler(c *gin.Context) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	tokenString, err := token.SignedString([]byte(m.config.JWTSecret))
 	if err != nil {
-		m.logger.Error("Failed to generate token", "error", err)
+		m.Error("Failed to generate token", "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to generate authentication token", "TOKEN_ERROR", err)
 		return
 	}
 
-	m.logger.Info("Successful login", "ip", c.ClientIP())
+	m.Info("Successful login", "ip", c.ClientIP())
 
 	m.logMessage("INFO", "User login", map[string]interface{}{
 		"component": "auth",
@@ -923,61 +1023,6 @@ func (m *APIKeyManager) loginHandler(c *gin.Context) {
 	})
 }
 
-func (m *APIKeyManager) healthHandler(c *gin.Context) {
-	mongoStatus := m.isMongoConnected()
-	if mongoStatus {
-		ctx, cancel := context.WithTimeout(m.ctx, 3*time.Second)
-		defer cancel()
-		if err := m.mongoClient.Ping(ctx, readpref.Primary()); err != nil {
-			mongoStatus = false
-			m.setMongoStatus(false)
-		}
-	}
-
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-
-	keys := m.cache.ListKeys()
-	activeKeys := int64(0)
-	expiredKeys := int64(0)
-	totalRequests := int64(0)
-	now := time.Now().UTC()
-
-	for _, key := range keys {
-		totalRequests += key.UsageCount
-		if key.IsActive && key.Expiration.After(now) {
-			activeKeys++
-		} else if key.Expiration.Before(now) {
-			expiredKeys++
-		}
-	}
-
-	stats := SystemStats{
-		TotalKeys:     int64(len(keys)),
-		ActiveKeys:    activeKeys,
-		ExpiredKeys:   expiredKeys,
-		TotalRequests: totalRequests,
-		Uptime:        int64(time.Since(m.startTime).Seconds()),
-		MemoryUsage:   int64(memStats.Alloc),
-		GoRoutines:    runtime.NumGoroutine(),
-		MongoStatus:   mongoStatus,
-		CacheHitRate:  m.cache.GetHitRate(),
-	}
-
-	status := "healthy"
-	httpStatus := http.StatusOK
-	if !mongoStatus {
-		status = "degraded"
-		httpStatus = http.StatusServiceUnavailable
-	}
-
-	c.JSON(httpStatus, gin.H{
-		"status":    status,
-		"stats":     stats,
-		"timestamp": time.Now().UTC(),
-	})
-}
-
 func (m *APIKeyManager) createAPIKeyHandler(c *gin.Context) {
 	var req CreateKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -987,17 +1032,17 @@ func (m *APIKeyManager) createAPIKeyHandler(c *gin.Context) {
 
 	apiKey, err := m.generateAPIKey(req)
 	if err != nil {
-		m.logger.Error("Failed to create API key", "error", err, "ip", c.ClientIP())
+		m.Error("Failed to create API key", "error", err, "ip", c.ClientIP())
 		m.respondWithError(c, http.StatusBadRequest, err.Error(), "KEY_CREATION_FAILED", err)
 		return
 	}
 
-	m.logger.Info("API key created successfully", "keyId", maskAPIKey(apiKey.ID), "ip", c.ClientIP())
+	m.Info("API key created successfully", "keyId", maskAPIKey(apiKey.ID), "ip", c.ClientIP())
 	m.respondWithSuccess(c, m.toAPIKeyResponse(apiKey), "API key created successfully")
 }
 
 func (m *APIKeyManager) listAPIKeysHandler(c *gin.Context) {
-	m.logger.Debug("API Keys request", "ip", c.ClientIP())
+	m.Debug("API Keys request", "ip", c.ClientIP())
 
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "50"))
@@ -1153,7 +1198,7 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 	}
 
 	if err := m.SaveAPIKey(apiKey); err != nil {
-		m.logger.Error("Failed to update API key", "keyId", keyID, "error", err)
+		m.Error("Failed to update API key", "keyId", keyID, "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to update API key", "UPDATE_FAILED", err)
 		return
 	}
@@ -1198,7 +1243,7 @@ func (m *APIKeyManager) deleteAPIKeyHandler(c *gin.Context) {
 	})
 
 	if err != nil {
-		m.logger.Error("Failed to delete API key", "keyId", keyID, "error", err)
+		m.Error("Failed to delete API key", "keyId", keyID, "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to delete API key", "DELETE_FAILED", err)
 		return
 	}
@@ -1270,7 +1315,7 @@ func (m *APIKeyManager) cleanExpiredKeysHandler(c *gin.Context) {
 	})
 
 	if err != nil {
-		m.logger.Error("Failed to clean expired keys", "error", err)
+		m.Error("Failed to clean expired keys", "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to clean expired keys", "CLEANUP_FAILED", err)
 		return
 	}
@@ -1290,7 +1335,7 @@ func (m *APIKeyManager) cleanExpiredKeysHandler(c *gin.Context) {
 }
 
 func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
-	m.logger.Debug("Logs request", "ip", c.ClientIP())
+	m.Debug("Logs request", "ip", c.ClientIP())
 
 	if !m.isMongoConnected() {
 		m.respondWithError(c, http.StatusServiceUnavailable, "Database connection unavailable", "DB_UNAVAILABLE", nil)
@@ -1329,7 +1374,7 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 
 	totalCount, err := m.logsCollection.CountDocuments(ctx, filter)
 	if err != nil {
-		m.logger.Error("Error counting logs", "error", err)
+		m.Error("Error counting logs", "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to count logs", "COUNT_FAILED", err)
 		return
 	}
@@ -1343,7 +1388,7 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 
 	cursor, err := m.logsCollection.Find(ctx, filter, opts)
 	if err != nil {
-		m.logger.Error("Error finding logs", "error", err)
+		m.Error("Error finding logs", "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to retrieve logs", "RETRIEVAL_FAILED", err)
 		return
 	}
@@ -1351,7 +1396,7 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 
 	var logs []LogEntry
 	if err := cursor.All(ctx, &logs); err != nil {
-		m.logger.Error("Error decoding logs", "error", err)
+		m.Error("Error decoding logs", "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to decode logs", "DECODE_FAILED", err)
 		return
 	}
@@ -1376,11 +1421,11 @@ func (m *APIKeyManager) getLogsHandler(c *gin.Context) {
 }
 
 func (m *APIKeyManager) wsHandler(c *gin.Context) {
-	m.logger.Info("WebSocket connection attempt", "ip", c.ClientIP())
+	m.Info("WebSocket connection attempt", "ip", c.ClientIP())
 
 	token := c.Query("token")
 	if token == "" {
-		m.logger.Warn("Missing token in WebSocket query", "ip", c.ClientIP())
+		m.Warn("Missing token in WebSocket query", "ip", c.ClientIP())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token required for WebSocket connection"})
 		return
 	}
@@ -1394,35 +1439,41 @@ func (m *APIKeyManager) wsHandler(c *gin.Context) {
 	})
 
 	if err != nil || !parsedToken.Valid {
-		m.logger.Warn("Invalid WebSocket token", "ip", c.ClientIP(), "error", err)
+		m.Warn("Invalid WebSocket token", "ip", c.ClientIP(), "error", err)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired token"})
 		return
 	}
 
 	conn, err := m.upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		m.logger.Error("WebSocket upgrade failed", "ip", c.ClientIP(), "error", err)
+		m.Error("WebSocket upgrade failed", "ip", c.ClientIP(), "error", err)
 		return
 	}
 
 	clientID := generateRequestID()
-	m.wsClients.Store(clientID, conn)
+	wsClient := &WSClient{
+		conn:     conn,
+		clientID: clientID,
+		lastPing: time.Now(),
+	}
 
-	m.logger.Info("WebSocket client connected", "clientId", clientID, "ip", c.ClientIP())
+	m.wsClients.Store(clientID, wsClient)
+	m.Info("WebSocket client connected", "clientId", clientID, "ip", c.ClientIP())
 
-	go m.handleWebSocketClient(clientID, conn)
+	go m.handleWebSocketClient(clientID, wsClient)
 }
 
-func (m *APIKeyManager) handleWebSocketClient(clientID string, conn *websocket.Conn) {
+func (m *APIKeyManager) handleWebSocketClient(clientID string, wsClient *WSClient) {
 	defer func() {
 		m.wsClients.Delete(clientID)
-		conn.Close()
-		m.logger.Info("WebSocket client disconnected", "clientId", clientID)
+		wsClient.Close()
+		m.Info("WebSocket client disconnected", "clientId", clientID)
 	}()
 
-	conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	wsClient.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	wsClient.conn.SetPongHandler(func(string) error {
+		wsClient.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		wsClient.lastPing = time.Now()
 		return nil
 	})
 
@@ -1434,15 +1485,15 @@ func (m *APIKeyManager) handleWebSocketClient(clientID string, conn *websocket.C
 		case <-m.ctx.Done():
 			return
 		case <-pingTicker.C:
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				m.logger.Warn("Failed to send ping", "clientId", clientID, "error", err)
+			if err := wsClient.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				m.Warn("Failed to send ping", "clientId", clientID, "error", err)
 				return
 			}
 		default:
-			_, message, err := conn.ReadMessage()
+			_, message, err := wsClient.conn.ReadMessage()
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					m.logger.Warn("WebSocket unexpected close", "clientId", clientID, "error", err)
+					m.Warn("WebSocket unexpected close", "clientId", clientID, "error", err)
 				}
 				return
 			}
@@ -1455,7 +1506,7 @@ func (m *APIKeyManager) handleWebSocketClient(clientID string, conn *websocket.C
 						"timestamp": time.Now().UTC(),
 					}
 					if data, err := json.Marshal(response); err == nil {
-						conn.WriteMessage(websocket.TextMessage, data)
+						wsClient.conn.WriteMessage(websocket.TextMessage, data)
 					}
 				}
 			}
@@ -1467,34 +1518,44 @@ func (m *APIKeyManager) broadcastEvent(event WSMessage) {
 	select {
 	case m.eventChan <- event:
 	default:
-		m.logger.Warn("Event channel full, dropping event", "type", event.Type)
+		m.Warn("Event channel full, dropping event", "type", event.Type)
 	}
 }
 
 func (m *APIKeyManager) eventBroadcaster() {
 	go func() {
-		m.logger.Info("Event broadcaster started")
+		m.Info("Event broadcaster started")
 		for {
 			select {
 			case event := <-m.eventChan:
 				clientCount := 0
+				toDelete := make([]string, 0)
+
 				m.wsClients.Range(func(key, value interface{}) bool {
-					if conn, ok := value.(*websocket.Conn); ok {
-						conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-						if err := conn.WriteJSON(event); err != nil {
-							m.logger.Warn("Failed to send event to client", "clientId", key, "error", err)
-							m.wsClients.Delete(key)
+					if wsClient, ok := value.(*WSClient); ok {
+						if err := wsClient.Send(event); err != nil {
+							m.Warn("Failed to send event to client", "clientId", key, "error", err)
+							toDelete = append(toDelete, key.(string))
 						} else {
 							clientCount++
 						}
 					}
 					return true
 				})
+
+				for _, clientID := range toDelete {
+					if value, ok := m.wsClients.LoadAndDelete(clientID); ok {
+						if wsClient, ok := value.(*WSClient); ok {
+							wsClient.Close()
+						}
+					}
+				}
+
 				if clientCount > 0 {
-					m.logger.Debug("Broadcasted event", "type", event.Type, "clients", clientCount)
+					m.Debug("Broadcasted event", "type", event.Type, "clients", clientCount)
 				}
 			case <-m.ctx.Done():
-				m.logger.Info("Event broadcaster stopping")
+				m.Info("Event broadcaster stopping")
 				return
 			}
 		}
@@ -1502,7 +1563,7 @@ func (m *APIKeyManager) eventBroadcaster() {
 }
 
 func (m *APIKeyManager) logMessage(level, message string, metadata map[string]interface{}) {
-	m.logger.Info(fmt.Sprintf("[%s] %s", level, message))
+	m.Info(fmt.Sprintf("[%s] %s", level, message))
 
 	if !m.isMongoConnected() {
 		return
@@ -1532,7 +1593,7 @@ func (m *APIKeyManager) logMessage(level, message string, metadata map[string]in
 		defer cancel()
 
 		if _, err := m.logsCollection.InsertOne(ctx, logEntry); err != nil {
-			m.logger.Error("Failed to insert log entry", "error", err)
+			m.Error("Failed to insert log entry", "error", err)
 			return
 		}
 
@@ -1547,14 +1608,14 @@ func (m *APIKeyManager) logMessage(level, message string, metadata map[string]in
 
 func (m *APIKeyManager) shutdown() {
 	m.shutdownOnce.Do(func() {
-		m.logger.Info("Starting graceful shutdown...")
+		m.Info("Starting graceful shutdown...")
 
 		m.cancel()
 
 		m.wsClients.Range(func(key, value interface{}) bool {
-			if conn, ok := value.(*websocket.Conn); ok {
-				conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "Server shutting down"))
-				conn.Close()
+			if wsClient, ok := value.(*WSClient); ok {
+				wsClient.conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseGoingAway, "Server shutting down"))
+				wsClient.Close()
 			}
 			m.wsClients.Delete(key)
 			return true
@@ -1566,11 +1627,15 @@ func (m *APIKeyManager) shutdown() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			if err := m.mongoClient.Disconnect(ctx); err != nil {
-				m.logger.Error("Error disconnecting from MongoDB", "error", err)
+				m.Error("Error disconnecting from MongoDB", "error", err)
 			}
 		}
 
-		m.logger.Info("Shutdown complete")
+		if m.fileLogger != nil {
+			m.fileLogger.Close()
+		}
+
+		m.Info("Shutdown complete")
 	})
 }
 
@@ -1616,9 +1681,8 @@ func main() {
 	router.Use(manager.loggingMiddleware())
 	router.Use(gin.Recovery())
 	router.Use(manager.requestIDMiddleware())
-	router.Use(manager.securityMiddleware())
 	router.Use(manager.corsMiddleware())
-	router.Use(manager.rateLimitMiddleware())
+	router.Use(manager.validationMiddleware())
 
 	staticFS, err := static.EmbedFolder(staticFiles, "frontend/dist")
 	if err != nil {
@@ -1628,7 +1692,6 @@ func main() {
 	}
 
 	router.POST("/api/v1/auth/login", manager.loginHandler)
-	router.GET("/api/v1/health", manager.healthHandler)
 	router.GET("/api/v1/ws", manager.wsHandler)
 
 	api := router.Group("/api/v1")
@@ -1671,7 +1734,6 @@ func main() {
 	}()
 
 	log.Printf("Server is ready and listening on http://localhost:%s", config.ServerPort)
-	log.Printf("Health check: http://localhost:%s/api/v1/health", config.ServerPort)
 	log.Printf("Admin login required for management interface")
 
 	quit := make(chan os.Signal, 1)

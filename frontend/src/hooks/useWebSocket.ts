@@ -3,24 +3,60 @@ import { useStore } from '../store/useStore';
 import { WSEvent, APIKey, LogEntry } from '../types';
 import toast from 'react-hot-toast';
 
+interface WebSocketMetrics {
+  totalConnections: number;
+  totalReconnections: number;
+  totalMessages: number;
+  totalErrors: number;
+  lastError: string | null;
+  connectionUptime: number;
+}
+
 export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   const reconnectAttempts = useRef(0);
+  const heartbeatInterval = useRef<NodeJS.Timeout>();
+  const connectionStartTime = useRef<number>(0);
+  const messageQueue = useRef<WSEvent[]>([]);
+  
   const [isConnected, setIsConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState<'disconnected' | 'connecting' | 'connected' | 'reconnecting'>('disconnected');
+  const [metrics, setMetrics] = useState<WebSocketMetrics>({
+    totalConnections: 0,
+    totalReconnections: 0,
+    totalMessages: 0,
+    totalErrors: 0,
+    lastError: null,
+    connectionUptime: 0
+  });
+
   const maxReconnectAttempts = 5;
   const baseReconnectDelay = 1000;
+  const heartbeatInterval_ms = 30000;
+  const maxMessageQueueSize = 100;
   const mountedRef = useRef(true);
 
   const { 
     addApiKey, 
     updateApiKey, 
     removeApiKey, 
-    addLog 
+    addLog,
+    updateConnectionStatus 
   } = useStore();
+
+  const updateMetrics = useCallback((updates: Partial<WebSocketMetrics>) => {
+    setMetrics(prev => ({
+      ...prev,
+      ...updates,
+      connectionUptime: connectionStartTime.current ? Date.now() - connectionStartTime.current : 0
+    }));
+  }, []);
 
   const handleMessage = useCallback((event: WSEvent) => {
     if (!mountedRef.current) return;
+
+    updateMetrics({ totalMessages: metrics.totalMessages + 1 });
 
     try {
       switch (event.type) {
@@ -57,6 +93,19 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           }
           break;
 
+        case 'pong':
+          break;
+
+        case 'error':
+          if (event.data?.message) {
+            toast.error(event.data.message);
+            updateMetrics({ 
+              totalErrors: metrics.totalErrors + 1,
+              lastError: event.data.message 
+            });
+          }
+          break;
+
         default:
           console.log('Unknown WebSocket event type:', event.type);
       }
@@ -66,31 +115,83 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       }
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
+      updateMetrics({ 
+        totalErrors: metrics.totalErrors + 1,
+        lastError: `Message handling error: ${error}` 
+      });
     }
-  }, [addApiKey, updateApiKey, removeApiKey, addLog, onMessage]);
+  }, [addApiKey, updateApiKey, removeApiKey, addLog, onMessage, metrics, updateMetrics]);
+
+  const processMessageQueue = useCallback(() => {
+    if (ws.current?.readyState === WebSocket.OPEN && messageQueue.current.length > 0) {
+      const messages = messageQueue.current.splice(0);
+      messages.forEach(message => {
+        try {
+          ws.current?.send(JSON.stringify(message));
+        } catch (error) {
+          console.error('Failed to send queued message:', error);
+        }
+      });
+    }
+  }, []);
+
+  const startHeartbeat = useCallback(() => {
+    if (heartbeatInterval.current) {
+      clearInterval(heartbeatInterval.current);
+    }
+
+    heartbeatInterval.current = setInterval(() => {
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        try {
+          ws.current.send(JSON.stringify({
+            type: 'ping',
+            timestamp: new Date().toISOString()
+          }));
+        } catch (error) {
+          console.error('Failed to send heartbeat:', error);
+        }
+      }
+    }, heartbeatInterval_ms);
+  }, []);
+
+  const stopHeartbeat = useCallback(() => {
+    if (heartbeatInterval.current) {
+      clearInterval(heartbeatInterval.current);
+      heartbeatInterval.current = undefined;
+    }
+  }, []);
 
   const cleanup = useCallback(() => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
       reconnectTimeoutRef.current = undefined;
     }
+
+    stopHeartbeat();
     
     if (ws.current) {
-      ws.current.onopen = null;
-      ws.current.onmessage = null;
-      ws.current.onclose = null;
-      ws.current.onerror = null;
-      
-      if (ws.current.readyState === WebSocket.OPEN || 
-          ws.current.readyState === WebSocket.CONNECTING) {
-        ws.current.close(1000, 'Component unmounting');
-      }
-      
+      const currentWs = ws.current;
       ws.current = null;
+      
+      currentWs.onopen = null;
+      currentWs.onmessage = null;
+      currentWs.onclose = null;
+      currentWs.onerror = null;
+      
+      if (currentWs.readyState === WebSocket.OPEN || 
+          currentWs.readyState === WebSocket.CONNECTING) {
+        try {
+          currentWs.close(1000, 'Component unmounting');
+        } catch (error) {
+          console.error('Error closing WebSocket:', error);
+        }
+      }
     }
     
     setIsConnected(false);
-  }, []);
+    setConnectionState('disconnected');
+    connectionStartTime.current = 0;
+  }, [stopHeartbeat]);
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
@@ -108,6 +209,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
 
     try {
       cleanup();
+      setConnectionState('connecting');
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/api/v1/ws?token=${encodeURIComponent(token)}`;
@@ -115,18 +217,30 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       console.log('Attempting WebSocket connection to:', wsUrl);
       
       ws.current = new WebSocket(wsUrl);
+      connectionStartTime.current = Date.now();
       
       ws.current.onopen = () => {
         if (!mountedRef.current) return;
         
         console.log('WebSocket connected successfully');
         setIsConnected(true);
+        setConnectionState('connected');
         reconnectAttempts.current = 0;
+        
+        updateMetrics({ 
+          totalConnections: metrics.totalConnections + 1,
+          lastError: null 
+        });
+        
+        updateConnectionStatus({ websocket: true });
         
         if (reconnectTimeoutRef.current) {
           clearTimeout(reconnectTimeoutRef.current);
           reconnectTimeoutRef.current = undefined;
         }
+
+        startHeartbeat();
+        processMessageQueue();
 
         toast.success('Real-time connection established', { 
           id: 'ws-connection',
@@ -142,6 +256,10 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           handleMessage(data);
         } catch (error) {
           console.error('WebSocket message parse error:', error);
+          updateMetrics({ 
+            totalErrors: metrics.totalErrors + 1,
+            lastError: `Parse error: ${error}` 
+          });
         }
       };
 
@@ -150,14 +268,20 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         
         console.log('WebSocket disconnected:', event.code, event.reason);
         setIsConnected(false);
+        setConnectionState('disconnected');
+        stopHeartbeat();
+        updateConnectionStatus({ websocket: false });
         
         if (event.code !== 1000 && reconnectAttempts.current < maxReconnectAttempts) {
+          setConnectionState('reconnecting');
           const delay = Math.min(
             baseReconnectDelay * Math.pow(2, reconnectAttempts.current),
             30000
           );
           
           console.log(`Attempting reconnection in ${delay}ms (attempt ${reconnectAttempts.current + 1}/${maxReconnectAttempts})`);
+          
+          updateMetrics({ totalReconnections: metrics.totalReconnections + 1 });
           
           reconnectTimeoutRef.current = setTimeout(() => {
             if (mountedRef.current) {
@@ -167,6 +291,9 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           }, delay);
         } else if (reconnectAttempts.current >= maxReconnectAttempts) {
           console.error('Max WebSocket reconnection attempts reached');
+          updateMetrics({ 
+            lastError: 'Max reconnection attempts reached' 
+          });
           toast.error('Connection lost. Please refresh the page.', {
             id: 'ws-connection-lost',
             duration: 0
@@ -186,19 +313,31 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         
         console.error('WebSocket error:', error);
         setIsConnected(false);
+        updateMetrics({ 
+          totalErrors: metrics.totalErrors + 1,
+          lastError: 'Connection error occurred' 
+        });
+        updateConnectionStatus({ websocket: false });
       };
 
     } catch (error) {
       console.error('WebSocket connection error:', error);
       setIsConnected(false);
+      setConnectionState('disconnected');
+      updateMetrics({ 
+        totalErrors: metrics.totalErrors + 1,
+        lastError: `Connection setup error: ${error}` 
+      });
     }
-  }, [handleMessage, cleanup]);
+  }, [handleMessage, cleanup, startHeartbeat, processMessageQueue, stopHeartbeat, updateConnectionStatus, metrics, updateMetrics]);
 
   const disconnect = useCallback(() => {
     console.log('Disconnecting WebSocket');
     cleanup();
     reconnectAttempts.current = 0;
-  }, [cleanup]);
+    messageQueue.current = [];
+    updateConnectionStatus({ websocket: false });
+  }, [cleanup, updateConnectionStatus]);
 
   const sendMessage = useCallback((message: any) => {
     if (ws.current?.readyState === WebSocket.OPEN) {
@@ -207,13 +346,47 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         return true;
       } catch (error) {
         console.error('Error sending WebSocket message:', error);
+        updateMetrics({ 
+          totalErrors: metrics.totalErrors + 1,
+          lastError: `Send error: ${error}` 
+        });
         return false;
       }
     } else {
-      console.warn('WebSocket not connected, cannot send message');
+      if (messageQueue.current.length < maxMessageQueueSize) {
+        messageQueue.current.push(message);
+        console.log('Message queued for sending when connection is available');
+      } else {
+        console.warn('Message queue full, dropping message');
+      }
       return false;
     }
-  }, []);
+  }, [metrics, updateMetrics]);
+
+  const forceReconnect = useCallback(() => {
+    console.log('Force reconnecting WebSocket');
+    reconnectAttempts.current = 0;
+    cleanup();
+    setTimeout(() => {
+      if (mountedRef.current) {
+        connect();
+      }
+    }, 1000);
+  }, [cleanup, connect]);
+
+  const getConnectionStatus = useCallback(() => {
+    return {
+      isConnected,
+      state: connectionState,
+      reconnectAttempts: reconnectAttempts.current,
+      maxReconnectAttempts,
+      queuedMessages: messageQueue.current.length,
+      metrics: {
+        ...metrics,
+        connectionUptime: connectionStartTime.current ? Date.now() - connectionStartTime.current : 0
+      }
+    };
+  }, [isConnected, connectionState, metrics]);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -237,10 +410,13 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       if (!mountedRef.current) return;
       
       if (document.hidden) {
-        console.log('Page hidden - WebSocket will maintain connection');
+        console.log('Page hidden - maintaining WebSocket connection but reducing activity');
+        stopHeartbeat();
       } else {
-        console.log('Page visible - checking WebSocket connection');
-        if (!isConnected) {
+        console.log('Page visible - resuming full WebSocket activity');
+        if (isConnected && ws.current?.readyState === WebSocket.OPEN) {
+          startHeartbeat();
+        } else if (!isConnected) {
           const token = localStorage.getItem('token');
           if (token) {
             setTimeout(connect, 500);
@@ -265,6 +441,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     const handleOffline = () => {
       console.log('Network offline - WebSocket will disconnect');
       setIsConnected(false);
+      updateConnectionStatus({ websocket: false });
     };
 
     const handleStorageChange = (e: StorageEvent) => {
@@ -279,18 +456,30 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       }
     };
 
+    const handleBeforeUnload = () => {
+      if (ws.current?.readyState === WebSocket.OPEN) {
+        try {
+          ws.current.close(1000, 'Page unloading');
+        } catch (error) {
+          console.error('Error closing WebSocket on unload:', error);
+        }
+      }
+    };
+
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     window.addEventListener('storage', handleStorageChange);
+    window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       window.removeEventListener('storage', handleStorageChange);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-  }, [connect, disconnect, isConnected]);
+  }, [connect, disconnect, isConnected, startHeartbeat, stopHeartbeat, updateConnectionStatus]);
 
   useEffect(() => {
     return () => {
@@ -300,8 +489,11 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
 
   return { 
     isConnected,
+    connectionState,
     sendMessage,
-    reconnect: connect,
-    disconnect
+    reconnect: forceReconnect,
+    disconnect,
+    getConnectionStatus,
+    metrics
   };
 };

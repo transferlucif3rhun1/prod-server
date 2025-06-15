@@ -20,7 +20,9 @@ import {
   Clock,
   Grid,
   List,
-  Infinity
+  Infinity,
+  WifiOff,
+  AlertTriangle
 } from 'lucide-react';
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
@@ -60,6 +62,8 @@ const ManageKeys: React.FC = () => {
   const [itemsPerPage] = useState(10);
   const [copyStates, setCopyStates] = useState<{[key: string]: boolean}>({});
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
+  const [retryAttempts, setRetryAttempts] = useState(0);
+  const [offlineMode, setOfflineMode] = useState(false);
 
   useEffect(() => {
     fetchKeys();
@@ -80,10 +84,32 @@ const ManageKeys: React.FC = () => {
     return () => document.removeEventListener('click', handleClickOutside);
   }, []);
 
+  useEffect(() => {
+    const handleOnline = () => {
+      setOfflineMode(false);
+      if (retryAttempts > 0) {
+        fetchKeys(false);
+      }
+    };
+
+    const handleOffline = () => {
+      setOfflineMode(true);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [retryAttempts]);
+
   const fetchKeys = useCallback(async (useCache = true) => {
     try {
       setKeysLoading(true);
       setKeysError(null);
+      setRetryAttempts(0);
       
       const response = await apiService.getKeys({ limit: 1000 }, useCache);
       setApiKeys(response.data || []);
@@ -92,13 +118,36 @@ const ManageKeys: React.FC = () => {
         toast.info('No API keys found. Create your first key to get started.');
       }
     } catch (error: any) {
-      const errorMessage = error.message || 'Unable to load API keys. Please try again.';
+      setRetryAttempts(prev => prev + 1);
+      
+      let errorMessage = 'Unable to load API keys. Please try again.';
+      let showRetry = true;
+      
+      if (error.message?.includes('Network error') || error.message?.includes('timeout')) {
+        errorMessage = 'Network connection problem. Check your internet connection.';
+        setOfflineMode(true);
+      } else if (error.message?.includes('500') || error.message?.includes('Internal Server Error')) {
+        errorMessage = 'Server error detected. The issue has been logged and will be resolved shortly.';
+      } else if (error.message?.includes('401') || error.message?.includes('Unauthorized')) {
+        errorMessage = 'Session expired. Please log in again.';
+        showRetry = false;
+        setTimeout(() => {
+          window.location.href = '/login';
+        }, 2000);
+      }
+      
       setKeysError(errorMessage);
-      toast.error(errorMessage);
+      
+      if (showRetry && retryAttempts < 3) {
+        toast.error(`${errorMessage} Retrying...`);
+        setTimeout(() => fetchKeys(false), Math.min(1000 * (retryAttempts + 1), 5000));
+      } else {
+        toast.error(errorMessage);
+      }
     } finally {
       setKeysLoading(false);
     }
-  }, [setApiKeys, setKeysLoading, setKeysError]);
+  }, [setApiKeys, setKeysLoading, setKeysError, retryAttempts]);
 
   const filterKeys = useCallback(() => {
     const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
@@ -223,7 +272,18 @@ const ManageKeys: React.FC = () => {
       toast.success('API key updated successfully');
       setShowEditModal(false);
     } catch (error: any) {
-      toast.error(error.message || 'Failed to update API key');
+      let errorMessage = 'Failed to update API key';
+      
+      if (error.message?.includes('500')) {
+        errorMessage = 'Server error occurred. Please try again in a moment.';
+      } else if (error.message?.includes('404')) {
+        errorMessage = 'API key not found. It may have been deleted.';
+        fetchKeys(false);
+      } else if (error.message?.includes('validation')) {
+        errorMessage = 'Invalid input data. Please check your values.';
+      }
+      
+      toast.error(errorMessage);
     } finally {
       setEditLoading(false);
     }
@@ -252,7 +312,15 @@ const ManageKeys: React.FC = () => {
       removeApiKey(keyId);
       toast.success(`API key "${displayName}" deleted successfully`);
     } catch (error: any) {
-      const errorMessage = error.message || 'Failed to delete API key. Please try again.';
+      let errorMessage = 'Failed to delete API key. Please try again.';
+      
+      if (error.message?.includes('500')) {
+        errorMessage = 'Server error occurred. Please try again in a moment.';
+      } else if (error.message?.includes('404')) {
+        errorMessage = 'API key not found. It may have already been deleted.';
+        fetchKeys(false);
+      }
+      
       toast.error(errorMessage);
     }
     setActionMenuKey(null);
@@ -288,7 +356,7 @@ const ManageKeys: React.FC = () => {
         toast.success(`Successfully deleted ${successKeys.length} API key(s)`);
       }
       if (failedKeys.length > 0) {
-        toast.error(`Failed to delete ${failedKeys.length} API key(s)`);
+        toast.error(`Failed to delete ${failedKeys.length} API key(s). Please try again.`);
       }
     } catch (error) {
       toast.error('Bulk delete operation failed. Please try again.');
@@ -410,6 +478,11 @@ const ManageKeys: React.FC = () => {
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
         <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
         <p className="text-gray-600 dark:text-gray-400">Loading your API keys...</p>
+        {retryAttempts > 0 && (
+          <p className="text-sm text-gray-500 dark:text-gray-500">
+            Retry attempt {retryAttempts}/3
+          </p>
+        )}
       </div>
     );
   }
@@ -417,20 +490,40 @@ const ManageKeys: React.FC = () => {
   if (keysError && (!apiKeys || apiKeys.length === 0)) {
     return (
       <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <div className="p-4 bg-red-100 dark:bg-red-900/20 rounded-lg text-center">
+        <div className="p-4 bg-red-100 dark:bg-red-900/20 rounded-lg text-center max-w-md">
           <AlertCircle className="w-8 h-8 text-red-600 dark:text-red-400 mx-auto mb-2" />
           <p className="text-red-800 dark:text-red-400 font-medium">Unable to Load API Keys</p>
           <p className="text-red-600 dark:text-red-500 text-sm mt-1">{keysError}</p>
+          {offlineMode && (
+            <div className="flex items-center justify-center mt-2 text-sm text-gray-600 dark:text-gray-400">
+              <WifiOff className="w-4 h-4 mr-1" />
+              <span>You appear to be offline</span>
+            </div>
+          )}
         </div>
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={() => fetchKeys(false)}
-          className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2"
-        >
-          <RefreshCw className="w-4 h-4" />
-          <span>Try Again</span>
-        </motion.button>
+        <div className="flex space-x-3">
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={() => fetchKeys(false)}
+            disabled={keysLoading}
+            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2 disabled:opacity-50"
+          >
+            <RefreshCw className={`w-4 h-4 ${keysLoading ? 'animate-spin' : ''}`} />
+            <span>Try Again</span>
+          </motion.button>
+          {retryAttempts > 0 && (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => window.location.href = '/create'}
+              className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center space-x-2"
+            >
+              <Plus className="w-4 h-4" />
+              <span>Create New Key</span>
+            </motion.button>
+          )}
+        </div>
       </div>
     );
   }
@@ -529,7 +622,8 @@ const ManageKeys: React.FC = () => {
                         {status.charAt(0).toUpperCase() + status.slice(1)}
                       </span>
                       {status === 'active' && isExpiringSoon && (
-                        <div className="text-xs text-yellow-600 dark:text-yellow-400 mt-1">
+                        <div className="text-xs text-yellow-600 dark:text-yellow-400 mt-1 flex items-center">
+                          <AlertTriangle className="w-3 h-3 mr-1" />
                           Expires soon
                         </div>
                       )}
@@ -678,7 +772,6 @@ const ManageKeys: React.FC = () => {
               }`}
             >
               <div className="p-4">
-                {/* Header with checkbox, name, and actions */}
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center space-x-3 flex-1 min-w-0">
                     <input
@@ -699,7 +792,8 @@ const ManageKeys: React.FC = () => {
                           {status.charAt(0).toUpperCase() + status.slice(1)}
                         </span>
                         {status === 'active' && isExpiringSoon && (
-                          <span className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900/20 px-2 py-0.5 rounded">
+                          <span className="text-xs text-yellow-600 dark:text-yellow-400 bg-yellow-100 dark:bg-yellow-900/20 px-2 py-0.5 rounded flex items-center">
+                            <AlertTriangle className="w-3 h-3 mr-1" />
                             Expires soon
                           </span>
                         )}
@@ -775,7 +869,6 @@ const ManageKeys: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Compact info grid */}
                 <div className="grid grid-cols-3 gap-3 mb-3 text-center">
                   <div>
                     <div className="flex items-center justify-center space-x-1 text-yellow-500 mb-1">
@@ -814,7 +907,6 @@ const ManageKeys: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Usage section */}
                 <div className="border-t border-gray-200 dark:border-gray-700 pt-3">
                   {(() => {
                     const usage = formatUsageDisplay(key.usageCount, key.totalRequests);
@@ -862,7 +954,6 @@ const ManageKeys: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      {/* Edit Modal */}
       <AnimatePresence>
         {showEditModal && editingKey && (
           <motion.div
@@ -989,6 +1080,22 @@ const ManageKeys: React.FC = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {offlineMode && (
+        <motion.div
+          initial={{ opacity: 0, y: -20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-yellow-100 dark:bg-yellow-900/20 border border-yellow-300 dark:border-yellow-700 rounded-lg p-4"
+        >
+          <div className="flex items-center space-x-3">
+            <WifiOff className="w-5 h-5 text-yellow-600 dark:text-yellow-400" />
+            <div>
+              <p className="text-yellow-800 dark:text-yellow-400 font-medium">You're currently offline</p>
+              <p className="text-yellow-600 dark:text-yellow-500 text-sm">Some features may not be available. Changes will sync when you're back online.</p>
+            </div>
+          </div>
+        </motion.div>
+      )}
 
       <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div className="flex-1 flex flex-col sm:flex-row items-stretch sm:items-center space-y-3 sm:space-y-0 sm:space-x-4">
