@@ -8,10 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -22,7 +25,6 @@ import (
 	"time"
 
 	"github.com/gin-contrib/cors"
-	"github.com/gin-contrib/static"
 	"github.com/gin-gonic/gin"
 	"github.com/gin-gonic/gin/binding"
 	"github.com/go-playground/validator/v10"
@@ -35,7 +37,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 )
 
-//go:embed frontend/dist/*
+//go:embed frontend/dist
 var staticFiles embed.FS
 
 type Config struct {
@@ -151,6 +153,12 @@ type ErrorResponse struct {
 	Details   string    `json:"details,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	RequestID string    `json:"requestId,omitempty"`
+}
+
+type HealthResponse struct {
+	Status    string                 `json:"status"`
+	Stats     map[string]interface{} `json:"stats"`
+	Timestamp time.Time              `json:"timestamp"`
 }
 
 type CacheMetrics struct {
@@ -973,6 +981,35 @@ func (m *APIKeyManager) respondWithSuccess(c *gin.Context, data interface{}, mes
 	c.JSON(http.StatusOK, response)
 }
 
+func (m *APIKeyManager) healthHandler(c *gin.Context) {
+	uptime := time.Since(m.startTime).Seconds()
+
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+
+	stats := map[string]interface{}{
+		"uptime":       uptime,
+		"totalKeys":    len(m.cache.ListKeys()),
+		"memoryUsage":  memStats.Alloc,
+		"mongoStatus":  m.isMongoConnected(),
+		"cacheHitRate": m.cache.GetHitRate(),
+		"goRoutines":   runtime.NumGoroutine(),
+	}
+
+	status := "healthy"
+	if !m.isMongoConnected() {
+		status = "degraded"
+	}
+
+	response := HealthResponse{
+		Status:    status,
+		Stats:     stats,
+		Timestamp: time.Now().UTC(),
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
 func (m *APIKeyManager) loginHandler(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1606,6 +1643,77 @@ func (m *APIKeyManager) logMessage(level, message string, metadata map[string]in
 	}()
 }
 
+func (m *APIKeyManager) staticFileHandler() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		requestPath := c.Request.URL.Path
+
+		filePath := path.Join("frontend/dist", requestPath)
+
+		file, err := staticFiles.Open(filePath)
+		if err != nil {
+			return
+		}
+		defer file.Close()
+
+		stat, err := file.Stat()
+		if err != nil {
+			return
+		}
+
+		if stat.IsDir() {
+			return
+		}
+
+		ext := filepath.Ext(requestPath)
+		contentType := mime.TypeByExtension(ext)
+		if contentType == "" {
+			switch ext {
+			case ".js":
+				contentType = "application/javascript"
+			case ".mjs":
+				contentType = "application/javascript"
+			case ".css":
+				contentType = "text/css"
+			case ".html":
+				contentType = "text/html"
+			case ".json":
+				contentType = "application/json"
+			case ".png":
+				contentType = "image/png"
+			case ".jpg", ".jpeg":
+				contentType = "image/jpeg"
+			case ".gif":
+				contentType = "image/gif"
+			case ".svg":
+				contentType = "image/svg+xml"
+			case ".ico":
+				contentType = "image/x-icon"
+			case ".woff":
+				contentType = "font/woff"
+			case ".woff2":
+				contentType = "font/woff2"
+			case ".ttf":
+				contentType = "font/ttf"
+			case ".eot":
+				contentType = "application/vnd.ms-fontobject"
+			default:
+				contentType = "application/octet-stream"
+			}
+		}
+
+		c.Header("Content-Type", contentType)
+		c.Header("Cache-Control", "public, max-age=31536000")
+
+		data, err := fs.ReadFile(staticFiles, filePath)
+		if err != nil {
+			return
+		}
+
+		c.Data(http.StatusOK, contentType, data)
+		c.Abort()
+	}
+}
+
 func (m *APIKeyManager) shutdown() {
 	m.shutdownOnce.Do(func() {
 		m.Info("Starting graceful shutdown...")
@@ -1684,14 +1792,8 @@ func main() {
 	router.Use(manager.corsMiddleware())
 	router.Use(manager.validationMiddleware())
 
-	staticFS, err := static.EmbedFolder(staticFiles, "frontend/dist")
-	if err != nil {
-		log.Printf("Error creating static file system: %v", err)
-	} else {
-		router.Use(static.Serve("/", staticFS))
-	}
-
 	router.POST("/api/v1/auth/login", manager.loginHandler)
+	router.GET("/api/v1/health", manager.healthHandler)
 	router.GET("/api/v1/ws", manager.wsHandler)
 
 	api := router.Group("/api/v1")
@@ -1706,17 +1808,20 @@ func main() {
 		api.GET("/logs", manager.getLogsHandler)
 	}
 
+	router.Use(manager.staticFileHandler())
+
 	router.NoRoute(func(c *gin.Context) {
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
 			manager.respondWithError(c, http.StatusNotFound, "API endpoint not found", "ENDPOINT_NOT_FOUND", nil)
-		} else {
-			indexHTML, err := staticFiles.ReadFile("frontend/dist/index.html")
-			if err != nil {
-				c.String(http.StatusNotFound, "404 page not found")
-				return
-			}
-			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
+			return
 		}
+
+		indexHTML, err := staticFiles.ReadFile("frontend/dist/index.html")
+		if err != nil {
+			c.String(http.StatusNotFound, "404 page not found")
+			return
+		}
+		c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 	})
 
 	server := &http.Server{

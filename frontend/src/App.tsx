@@ -1,4 +1,4 @@
-import React, { useEffect, Suspense, lazy } from 'react';
+import React, { useEffect, Suspense, lazy, useCallback } from 'react';
 import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from './hooks/useAuth';
@@ -47,7 +47,7 @@ const App: React.FC = () => {
   const { setCurrentPage, updateConnectionStatus } = useStore();
   const location = useLocation();
   
-  const handleWebSocketMessage = (event: WSEvent) => {
+  const handleWebSocketMessage = useCallback((event: WSEvent) => {
     try {
       switch (event.type) {
         case 'system_update':
@@ -72,9 +72,11 @@ const App: React.FC = () => {
     } catch (error) {
       console.error('Error handling WebSocket message in App:', error);
     }
-  };
+  }, []);
 
-  const { isConnected, connectionState, getConnectionStatus } = useWebSocket(handleWebSocketMessage);
+  const { isConnected, connectionState, getConnectionStatus } = useWebSocket(
+    isAuthenticated ? handleWebSocketMessage : undefined
+  );
 
   useEffect(() => {
     const initializeTheme = () => {
@@ -99,7 +101,8 @@ const App: React.FC = () => {
     if (typeof window !== 'undefined') {
       const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
       const handleThemeChange = (e: MediaQueryListEvent) => {
-        if (localStorage.getItem('theme') === null) {
+        const storedTheme = localStorage.getItem('theme');
+        if (storedTheme === null) {
           if (e.matches) {
             document.documentElement.classList.add('dark');
           } else {
@@ -114,8 +117,7 @@ const App: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    const path = location.pathname;
-    setCurrentPage(path);
+    setCurrentPage(location.pathname);
   }, [location.pathname, setCurrentPage]);
 
   useEffect(() => {
@@ -219,7 +221,7 @@ const App: React.FC = () => {
     };
   }, [updateConnectionStatus]);
 
-  const handleGlobalError = (error: Error, errorInfo: React.ErrorInfo) => {
+  const handleGlobalError = useCallback((error: Error, errorInfo: React.ErrorInfo) => {
     console.error('Application Error Boundary triggered:', error, errorInfo);
     
     const errorData = {
@@ -243,13 +245,13 @@ const App: React.FC = () => {
       console.error('Failed to store error data:', storageError);
     }
 
-    if (typeof window !== 'undefined' && (window as unknown as { gtag?: (...args: unknown[]) => void }).gtag) {
-      (window as unknown as { gtag: (...args: unknown[]) => void }).gtag('event', 'exception', {
+    if (typeof window !== 'undefined' && (window as any).gtag) {
+      (window as any).gtag('event', 'exception', {
         description: error.message,
         fatal: true
       });
     }
-  };
+  }, [location.pathname]);
 
   return (
     <ErrorBoundary onError={handleGlobalError}>

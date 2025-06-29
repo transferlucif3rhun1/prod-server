@@ -23,7 +23,6 @@ import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
 import { copyToClipboard } from '../utils';
-import { LoadingSpinner, ErrorDisplay, ActionButton, StatusBadge, EmptyState, formatValue, formatUsageDisplay } from './shared';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 
@@ -34,6 +33,174 @@ interface EditFormData {
   totalRequests: number;
   isActive: boolean;
 }
+
+const LoadingSpinner = ({ message = 'Loading...' }: { message?: string }) => (
+  <div className="flex flex-col items-center justify-center h-64 space-y-4">
+    <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
+    <p className="text-gray-600 dark:text-gray-400">{message}</p>
+  </div>
+);
+
+const ErrorDisplay = ({ 
+  title, 
+  message, 
+  onRetry, 
+  retryLabel = 'Try Again',
+  showOfflineIndicator = false 
+}: {
+  title: string;
+  message: string;
+  onRetry?: () => void;
+  retryLabel?: string;
+  showOfflineIndicator?: boolean;
+}) => (
+  <div className="flex flex-col items-center justify-center h-64 space-y-4">
+    <div className="p-4 bg-red-100 dark:bg-red-900/20 rounded-lg text-center max-w-md">
+      <p className="text-red-800 dark:text-red-400 font-medium">{title}</p>
+      <p className="text-red-600 dark:text-red-500 text-sm mt-1">{message}</p>
+      {showOfflineIndicator && (
+        <div className="flex items-center justify-center mt-2 text-sm text-gray-600 dark:text-gray-400">
+          <span>You appear to be offline</span>
+        </div>
+      )}
+    </div>
+    {onRetry && (
+      <motion.button
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
+        onClick={onRetry}
+        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2"
+      >
+        <RefreshCw className="w-4 h-4" />
+        <span>{retryLabel}</span>
+      </motion.button>
+    )}
+  </div>
+);
+
+const StatusBadge = ({ status, children }: { status: 'active' | 'expired' | 'inactive'; children: React.ReactNode }) => {
+  const statusClasses = {
+    active: 'bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400',
+    expired: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-400',
+    inactive: 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400'
+  };
+
+  return (
+    <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusClasses[status]}`}>
+      {children}
+    </span>
+  );
+};
+
+const ActionButton = ({ 
+  onClick, 
+  children, 
+  variant = 'primary', 
+  size = 'md', 
+  disabled = false, 
+  loading = false,
+  icon: Icon 
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+  variant?: 'primary' | 'secondary' | 'danger' | 'success';
+  size?: 'sm' | 'md' | 'lg';
+  disabled?: boolean;
+  loading?: boolean;
+  icon?: React.ElementType;
+}) => {
+  const baseClasses = 'font-medium rounded-lg transition-all duration-200 flex items-center justify-center space-x-2 disabled:cursor-not-allowed';
+  
+  const variantClasses = {
+    primary: 'bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white',
+    secondary: 'bg-gray-600 hover:bg-gray-700 disabled:bg-gray-400 text-white',
+    danger: 'bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white',
+    success: 'bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white'
+  };
+
+  const sizeClasses = {
+    sm: 'px-3 py-2 text-sm',
+    md: 'px-4 py-2',
+    lg: 'px-6 py-3 text-lg'
+  };
+
+  return (
+    <motion.button
+      whileHover={{ scale: disabled ? 1 : 1.05 }}
+      whileTap={{ scale: disabled ? 1 : 0.95 }}
+      onClick={onClick}
+      disabled={disabled || loading}
+      className={`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]}`}
+    >
+      {loading ? (
+        <RefreshCw className="w-4 h-4 animate-spin" />
+      ) : (
+        Icon && <Icon className="w-4 h-4" />
+      )}
+      <span>{children}</span>
+    </motion.button>
+  );
+};
+
+const EmptyState = ({ 
+  title, 
+  description, 
+  actionLabel, 
+  onAction, 
+  icon: Icon 
+}: {
+  title: string;
+  description: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  icon?: React.ElementType;
+}) => (
+  <div className="text-center py-12">
+    <div className="space-y-4">
+      {Icon && <Icon className="w-12 h-12 text-gray-400 mx-auto mb-4" />}
+      <div className="text-gray-500 dark:text-gray-400">
+        <p className="text-lg font-medium mb-2">{title}</p>
+        <p className="text-sm">{description}</p>
+      </div>
+      {actionLabel && onAction && (
+        <motion.button
+          whileHover={{ scale: 1.05 }}
+          whileTap={{ scale: 0.95 }}
+          onClick={onAction}
+          className="mt-4 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-flex items-center space-x-2"
+        >
+          <span>{actionLabel}</span>
+        </motion.button>
+      )}
+    </div>
+  </div>
+);
+
+const formatValue = (value: number): string => {
+  if (value === 0) {
+    return 'Unlimited';
+  }
+  return value.toLocaleString();
+};
+
+const formatUsageDisplay = (used: number, total: number) => {
+  if (total === 0) {
+    return {
+      text: `${used.toLocaleString()} used`,
+      subtext: 'Unlimited available',
+      percentage: null,
+      isUnlimited: true
+    };
+  }
+  
+  const percentage = Math.min((used / total) * 100, 100);
+  return {
+    text: `${used.toLocaleString()}/${total.toLocaleString()}`,
+    subtext: `${percentage.toFixed(1)}% used`,
+    percentage: percentage,
+    isUnlimited: false
+  };
+};
 
 const ManageKeys: React.FC = () => {
   const { 
@@ -69,6 +236,7 @@ const ManageKeys: React.FC = () => {
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [retryAttempts, setRetryAttempts] = useState(0);
   const [offlineMode, setOfflineMode] = useState(false);
+  const [lastFetchTime, setLastFetchTime] = useState<number>(0);
 
   const getKeyStatus = useCallback((key: APIKey): 'active' | 'expired' | 'inactive' => {
     const now = new Date();
@@ -120,33 +288,46 @@ const ManageKeys: React.FC = () => {
   }, [retryAttempts]);
 
   const fetchKeys = useCallback(async (useCache = true) => {
+    const now = Date.now();
+    const timeSinceLastFetch = now - lastFetchTime;
+    
+    if (timeSinceLastFetch < 1000) {
+      console.log('Skipping fetch - too soon since last request');
+      return;
+    }
+
     try {
       setKeysLoading(true);
       setKeysError(null);
       setRetryAttempts(0);
+      setLastFetchTime(now);
       
       const response = await apiService.getKeys({ limit: 1000 }, useCache);
-      setApiKeys(response.data || []);
+      const keysData = response.data || [];
       
-      if ((response.data || []).length === 0 && !useCache) {
-        toast.info('No API keys found. Create your first key to get started.');
+      setApiKeys(keysData);
+      
+      if (keysData.length === 0 && !useCache) {
+        console.log('No API keys found');
       }
     } catch (error: unknown) {
-      setRetryAttempts(prev => prev + 1);
+      console.error('Failed to fetch keys:', error);
       
       const errorMessage = error instanceof Error ? error.message : 'Unable to load API keys. Please try again.';
       setKeysError(errorMessage);
       
-      if (retryAttempts < 3) {
-        toast.error(`${errorMessage} Retrying...`);
-        setTimeout(() => fetchKeys(false), Math.min(1000 * (retryAttempts + 1), 5000));
+      if (retryAttempts < 3 && timeSinceLastFetch > 5000) {
+        setRetryAttempts(prev => prev + 1);
+        const retryDelay = Math.min(1000 * (retryAttempts + 1), 5000);
+        console.log(`Retrying in ${retryDelay}ms...`);
+        setTimeout(() => fetchKeys(false), retryDelay);
       } else {
-        toast.error(errorMessage);
+        console.error('Max retries reached or too frequent requests');
       }
     } finally {
       setKeysLoading(false);
     }
-  }, [setApiKeys, setKeysLoading, setKeysError, retryAttempts]);
+  }, [setApiKeys, setKeysLoading, setKeysError, retryAttempts, lastFetchTime]);
 
   const filterKeys = useCallback(() => {
     const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
@@ -168,19 +349,6 @@ const ManageKeys: React.FC = () => {
     setFilteredKeys(filtered);
     setCurrentPage(1);
   }, [apiKeys, searchTerm, filterStatus, getKeyStatus]);
-
-  const getStatusColor = useCallback((status: string): string => {
-    switch (status) {
-      case 'active': 
-        return 'bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400';
-      case 'expired': 
-        return 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-400';
-      case 'inactive': 
-        return 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400';
-      default: 
-        return 'bg-gray-100 text-gray-800 dark:bg-gray-900/20 dark:text-gray-400';
-    }
-  }, []);
 
   const handleCopyToClipboard = useCallback(async (text: string, keyId: string) => {
     try {
