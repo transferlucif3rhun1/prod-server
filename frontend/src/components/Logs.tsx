@@ -61,33 +61,27 @@ const Logs: React.FC = () => {
 
   const logLevels = ['all', 'INFO', 'WARN', 'ERROR', 'DEBUG'];
 
-  const getLogIcon = (level: string) => {
-    switch (level) {
-      case 'INFO':
-        return Info;
-      case 'WARN':
-        return AlertTriangle;
-      case 'ERROR':
-        return AlertCircle;
-      case 'DEBUG':
-        return Bug;
-      default:
-        return Info;
+  const logLevelConfig = {
+    INFO: {
+      icon: Info,
+      color: 'border-l-blue-500 bg-blue-50 dark:bg-blue-900/20',
+      textColor: 'text-blue-800 dark:text-blue-400'
+    },
+    WARN: {
+      icon: AlertTriangle,
+      color: 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-900/20',
+      textColor: 'text-yellow-800 dark:text-yellow-400'
+    },
+    ERROR: {
+      icon: AlertCircle,
+      color: 'border-l-red-500 bg-red-50 dark:bg-red-900/20',
+      textColor: 'text-red-800 dark:text-red-400'
+    },
+    DEBUG: {
+      icon: Bug,
+      color: 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20',
+      textColor: 'text-gray-800 dark:text-gray-400'
     }
-  };
-
-  const logColors = {
-    INFO: 'border-l-blue-500 bg-blue-50 dark:bg-blue-900/20',
-    WARN: 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-900/20',
-    ERROR: 'border-l-red-500 bg-red-50 dark:bg-red-900/20',
-    DEBUG: 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20'
-  };
-
-  const logTextColors = {
-    INFO: 'text-blue-800 dark:text-blue-400',
-    WARN: 'text-yellow-800 dark:text-yellow-400',
-    ERROR: 'text-red-800 dark:text-red-400',
-    DEBUG: 'text-gray-800 dark:text-gray-400'
   };
 
   useEffect(() => {
@@ -119,7 +113,7 @@ const Logs: React.FC = () => {
   }, []);
 
   function handleWebSocketMessage(event: any) {
-    if (event.type === 'log_entry' && isStreaming && event.data) {
+    if (isStreaming && event.type === 'log_entry' && event.data) {
       addLog(event.data);
       setLastUpdateTime(new Date());
     }
@@ -158,7 +152,7 @@ const Logs: React.FC = () => {
         toast.info('No logs found matching your criteria');
       }
     } catch (error: any) {
-      const errorMessage = error.message || 'Failed to load logs. Please try again.';
+      const errorMessage = error.response?.data?.error || 'Failed to load logs. Please try again.';
       setLogsError(errorMessage);
       toast.error(errorMessage);
       console.error('Failed to fetch logs:', error);

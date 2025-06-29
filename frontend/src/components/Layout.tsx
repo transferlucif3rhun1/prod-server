@@ -24,17 +24,55 @@ import { useAuth } from '../hooks/useAuth';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useStore } from '../store/useStore';
 import apiService from '../services/api';
-import { SystemStats } from '../types';
+import { SystemStats, APIKey } from '../types';
 import toast from 'react-hot-toast';
 
-const MetricCard = memo(({ icon: Icon, label, value, trend, color = 'blue', isLoading = false }: {
+interface MetricCardProps {
   icon: React.ElementType;
   label: string;
   value: string | number;
   trend?: number;
   color?: string;
   isLoading?: boolean;
-}) => (
+}
+
+interface NavigationItem {
+  name: string;
+  href: string;
+  icon: React.ElementType;
+  description: string;
+}
+
+interface NavigationItemProps {
+  item: NavigationItem;
+  isActive: boolean;
+  sidebarCollapsed: boolean;
+}
+
+interface SidebarProps {
+  sidebarCollapsed: boolean;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+  navigation: NavigationItem[];
+  location: { pathname: string };
+  stats: SystemStats | null;
+  isStatsLoading: boolean;
+  apiKeys: APIKey[];
+  isDarkMode: boolean;
+  toggleTheme: () => void;
+  isConnected: boolean;
+  handleLogout: () => void;
+}
+
+interface TopBarProps {
+  pageTitle: string;
+  pageDescription: string;
+  apiKeys: APIKey[];
+  getActiveKeysCount: () => number;
+  getExpiredKeysCount: () => number;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+}
+
+const MetricCard = memo<MetricCardProps>(({ icon: Icon, label, value, trend, color = 'blue', isLoading = false }) => (
   <motion.div
     whileHover={{ scale: 1.02 }}
     className="bg-white dark:bg-gray-800 rounded-lg p-3 border border-gray-200 dark:border-gray-700 shadow-sm"
@@ -65,11 +103,7 @@ const MetricCard = memo(({ icon: Icon, label, value, trend, color = 'blue', isLo
 
 MetricCard.displayName = 'MetricCard';
 
-const NavigationItem = memo(({ item, isActive, sidebarCollapsed }: {
-  item: { name: string; href: string; icon: React.ElementType; description: string };
-  isActive: boolean;
-  sidebarCollapsed: boolean;
-}) => {
+const NavigationItem = memo<NavigationItemProps>(({ item, isActive, sidebarCollapsed }) => {
   const Icon = item.icon;
   
   return (
@@ -112,7 +146,7 @@ const NavigationItem = memo(({ item, isActive, sidebarCollapsed }: {
 
 NavigationItem.displayName = 'NavigationItem';
 
-const Sidebar = memo(({ 
+const Sidebar = memo<SidebarProps>(({ 
   sidebarCollapsed, 
   setSidebarCollapsed, 
   navigation, 
@@ -124,11 +158,11 @@ const Sidebar = memo(({
   toggleTheme,
   isConnected,
   handleLogout 
-}: any) => {
+}) => {
 
   const getActiveKeysCount = useCallback(() => {
     const now = new Date();
-    return apiKeys.filter((key: any) => key.isActive && new Date(key.expiration) > now).length;
+    return apiKeys.filter((key: APIKey) => key.isActive && new Date(key.expiration) > now).length;
   }, [apiKeys]);
 
   const formatUptime = useCallback((seconds: number) => {
@@ -190,7 +224,7 @@ const Sidebar = memo(({
       </div>
 
       <nav className="flex-1 p-4 space-y-2 overflow-y-auto">
-        {navigation.map((item: any) => (
+        {navigation.map((item: NavigationItem) => (
           <NavigationItem
             key={item.name}
             item={item}
@@ -290,7 +324,7 @@ const Sidebar = memo(({
 
 Sidebar.displayName = 'Sidebar';
 
-const TopBar = memo(({ pageTitle, pageDescription, apiKeys, getActiveKeysCount, getExpiredKeysCount, setSidebarCollapsed }: any) => (
+const TopBar = memo<TopBarProps>(({ pageTitle, pageDescription, apiKeys, getActiveKeysCount, getExpiredKeysCount, setSidebarCollapsed }) => (
   <header className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700 px-6 py-4">
     <div className="flex items-center justify-between">
       <div>
@@ -358,7 +392,7 @@ const Layout: React.FC = () => {
   const [isDarkMode, setIsDarkMode] = useState(false);
   const { isConnected } = useWebSocket();
 
-  const navigation = useMemo(() => [
+  const navigation = useMemo<NavigationItem[]>(() => [
     { 
       name: 'Create Key', 
       href: '/create', 

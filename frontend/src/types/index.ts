@@ -10,6 +10,8 @@ export interface APIKey {
   createdAt: string;
   updatedAt: string;
   isActive: boolean;
+  lastUsed?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface CreateKeyRequest {
@@ -36,7 +38,8 @@ export interface LogEntry {
   message: string;
   component: string;
   timestamp: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
+  userId?: string;
 }
 
 export interface SystemStats {
@@ -62,6 +65,8 @@ export interface ApiResponse<T> {
   data: T;
   message?: string;
   pagination?: PaginationInfo;
+  success: boolean;
+  timestamp: string;
 }
 
 export interface AuthState {
@@ -73,8 +78,10 @@ export interface AuthState {
 
 export interface WSEvent {
   type: 'key_created' | 'key_updated' | 'key_deleted' | 'log_entry' | 'system_update' | 'error' | 'pong' | 'ping';
-  data?: any;
+  data?: unknown;
   changes?: string[];
+  timestamp?: string;
+  id?: string;
 }
 
 export interface AppError {
@@ -188,14 +195,14 @@ export interface ValidationResult {
   errors: ValidationError[];
 }
 
-export interface OperationResult<T = any> {
+export interface OperationResult<T = unknown> {
   success: boolean;
   data?: T;
   error?: string;
   timestamp: Date;
 }
 
-export interface AsyncOperation<T = any> {
+export interface AsyncOperation<T = unknown> {
   loading: boolean;
   error: string | null;
   data: T | null;
@@ -215,7 +222,7 @@ export interface ConfirmationDialog {
 
 export interface ContextMenuOption {
   label: string;
-  icon?: React.ComponentType<any>;
+  icon?: React.ComponentType<Record<string, unknown>>;
   onClick: () => void;
   disabled?: boolean;
   variant?: 'default' | 'danger';
@@ -227,7 +234,7 @@ export interface DataTableColumn<T> {
   sortable?: boolean;
   width?: string;
   align?: 'left' | 'center' | 'right';
-  render?: (value: any, item: T) => React.ReactNode;
+  render?: (value: unknown, item: T) => React.ReactNode;
 }
 
 export interface SortConfiguration {
@@ -241,7 +248,7 @@ export interface TableState<T> {
   error: string | null;
   pagination: PaginationInfo;
   sort: SortConfiguration;
-  filters: Record<string, any>;
+  filters: Record<string, unknown>;
   selectedItems: Set<string>;
 }
 
@@ -270,14 +277,14 @@ export interface ActivityLogEntry {
   description: string;
   timestamp: string;
   userId?: string;
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
 }
 
 export interface QuickAction {
   id: string;
   label: string;
   description: string;
-  icon: React.ComponentType<any>;
+  icon: React.ComponentType<Record<string, unknown>>;
   action: () => void;
   disabled?: boolean;
   badge?: string | number;
@@ -286,7 +293,7 @@ export interface QuickAction {
 export interface PresetConfiguration {
   name: string;
   description: string;
-  icon: React.ComponentType<any>;
+  icon: React.ComponentType<Record<string, unknown>>;
   color: string;
   config: Partial<CreateKeyRequest>;
 }
@@ -300,7 +307,7 @@ export interface SearchResult<T> {
 export interface BulkOperation {
   type: 'delete' | 'update' | 'export';
   label: string;
-  icon: React.ComponentType<any>;
+  icon: React.ComponentType<Record<string, unknown>>;
   confirmationRequired: boolean;
   handler: (selectedIds: string[]) => Promise<void>;
 }
@@ -362,6 +369,6 @@ export interface ExportResponse {
 
 declare global {
   interface Window {
-    gtag?: (...args: any[]) => void;
+    gtag?: (...args: unknown[]) => void;
   }
 }

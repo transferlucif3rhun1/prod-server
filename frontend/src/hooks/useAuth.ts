@@ -14,10 +14,11 @@ export const useAuth = create<AuthState>()(
           const response = await apiService.login(password);
           localStorage.setItem('token', response.token);
           set({ isAuthenticated: true, token: response.token });
-          return true;
-        } catch (error) {
-          console.error('Login failed:', error);
-          return false;
+          return { success: true };
+        } catch (error: any) {
+          const errorMessage = error.response?.data?.error || 'Login failed';
+          console.error('Login failed:', errorMessage);
+          return { success: false, error: errorMessage };
         }
       },
 

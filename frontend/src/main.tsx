@@ -5,7 +5,13 @@ import { Toaster } from 'react-hot-toast';
 import App from './App';
 import './styles/globals.css';
 
-ReactDOM.createRoot(document.getElementById('root')!).render(
+const rootElement = document.getElementById('root');
+
+if (!rootElement) {
+  throw new Error("Could not find root element to mount the application on.");
+}
+
+ReactDOM.createRoot(rootElement).render(
   <React.StrictMode>
     <BrowserRouter>
       <App />

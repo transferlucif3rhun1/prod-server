@@ -1,8 +1,18 @@
 import axios, { AxiosInstance, AxiosError, AxiosRequestConfig, AxiosResponse } from 'axios';
-import { APIKey, CreateKeyRequest, UpdateKeyRequest, LogEntry, SystemStats, ApiResponse } from '../types';
+import { 
+  APIKey, 
+  CreateKeyRequest, 
+  UpdateKeyRequest, 
+  LogEntry, 
+  SystemStats, 
+  ApiResponse,
+  PaginationInfo,
+  HealthResponse,
+  LoginResponse
+} from '../types';
 
 interface CacheItem {
-  data: any;
+  data: unknown;
   timestamp: number;
   ttl: number;
   etag?: string;
@@ -29,12 +39,27 @@ interface ExtendedAxiosRequestConfig extends AxiosRequestConfig {
   };
 }
 
+interface GetKeysParams {
+  page?: number;
+  limit?: number;
+  filter?: string;
+  search?: string;
+}
+
+interface GetLogsParams {
+  page?: number;
+  limit?: number;
+  level?: string;
+  component?: string;
+  search?: string;
+}
+
 class ApiService {
   private api: AxiosInstance;
   private cache: Map<string, CacheItem>;
   private readonly CACHE_TTL = 5 * 60 * 1000;
   private readonly CACHE_SHORT_TTL = 30 * 1000;
-  private retryQueue: Map<string, Promise<any>>;
+  private retryQueue: Map<string, Promise<unknown>>;
   private circuitBreaker: CircuitBreakerState;
   private healthCheckInterval?: NodeJS.Timeout;
   private networkStatus: 'online' | 'offline' = 'online';
@@ -186,51 +211,44 @@ class ApiService {
     }
   }
 
-  private handleError(error: any): Error {
+  private handleError(error: AxiosError | Error): Error {
     if (this.networkStatus === 'offline') {
       return new Error('You are currently offline. Please check your internet connection.');
     }
 
-    if (error.code === 'ECONNABORTED' || error.message?.includes('timeout')) {
+    if ('code' in error && (error.code === 'ECONNABORTED' || error.message?.includes('timeout'))) {
       return new Error('Request timeout. The server is taking too long to respond.');
     }
     
-    if (error.response) {
-      const status = error.response.status;
-      const message = error.response.data?.error || error.response.data?.message;
+    if ('response' in error && error.response) {
+      const { status, data } = error.response;
+      const responseData = data as { error?: string; message?: string };
+      const message = responseData?.error || responseData?.message;
       
-      switch (status) {
-        case 400:
-          return new Error(message || 'Invalid request data. Please check your input.');
-        case 401:
-          return new Error('Session expired. Please login again.');
-        case 403:
-          return new Error('Access denied. You don\'t have permission to perform this action.');
-        case 404:
-          return new Error(message || 'Resource not found.');
-        case 409:
-          return new Error(message || 'Conflict. The resource already exists.');
-        case 429:
-          return new Error('Too many requests. Please wait a moment and try again.');
-        case 500:
-          return new Error('Server error detected. Our team has been notified and is working on a fix.');
-        case 502:
-        case 503:
-        case 504:
-          return new Error('Service temporarily unavailable. Please try again in a few moments.');
-        default:
-          return new Error(message || `Request failed with status ${status}`);
-      }
+      const statusErrorMap: Record<number, string> = {
+        400: 'Invalid request data. Please check your input.',
+        401: 'Session expired. Please login again.',
+        403: "Access denied. You don't have permission to perform this action.",
+        404: 'Resource not found.',
+        409: 'Conflict. The resource already exists.',
+        429: 'Too many requests. Please wait a moment and try again.',
+        500: 'Server error detected. Our team has been notified and is working on a fix.',
+        502: 'Service temporarily unavailable. Please try again in a few moments.',
+        503: 'Service temporarily unavailable. Please try again in a few moments.',
+        504: 'Service temporarily unavailable. Please try again in a few moments.',
+      };
+
+      return new Error(message || statusErrorMap[status] || `Request failed with status ${status}`);
     }
     
-    if (error.request) {
+    if ('request' in error && error.request) {
       return new Error('Network error. Please check your internet connection and try again.');
     }
     
     return new Error(error.message || 'An unexpected error occurred. Please try again.');
   }
 
-  private getCacheKey(url: string, params?: any): string {
+  private getCacheKey(url: string, params?: unknown): string {
     return `${url}:${JSON.stringify(params || {})}`;
   }
 
@@ -238,7 +256,7 @@ class ApiService {
     return Date.now() - item.timestamp < item.ttl;
   }
 
-  private setCache(key: string, data: any, ttl: number = this.CACHE_TTL, etag?: string): void {
+  private setCache(key: string, data: unknown, ttl: number = this.CACHE_TTL, etag?: string): void {
     this.cache.set(key, {
       data: JSON.parse(JSON.stringify(data)),
       timestamp: Date.now(),
@@ -249,7 +267,8 @@ class ApiService {
     this.cleanupExpiredCache();
   }
 
-  private getCache(key: string): CacheItem | null {
+  private getCacheItem(url: string, params?: unknown): CacheItem | null {
+    const key = this.getCacheKey(url, params);
     const item = this.cache.get(key);
     if (item && this.isValidCache(item)) {
       return item;
@@ -302,14 +321,14 @@ class ApiService {
     for (let attempt = 1; attempt <= retryConfig.attempts; attempt++) {
       try {
         return await operation();
-      } catch (error: any) {
-        lastError = error;
+      } catch (error: unknown) {
+        lastError = error as Error;
         
         if (attempt === retryConfig.attempts) {
           break;
         }
         
-        if (error.response?.status && error.response.status < 500) {
+        if ('response' in (error as AxiosError) && (error as AxiosError).response?.status && (error as AxiosError).response!.status < 500) {
           break;
         }
         
@@ -328,7 +347,7 @@ class ApiService {
 
   private async withDeduplication<T>(key: string, operation: () => Promise<T>): Promise<T> {
     if (this.retryQueue.has(key)) {
-      return this.retryQueue.get(key)!;
+      return this.retryQueue.get(key) as Promise<T>;
     }
 
     const promise = operation().finally(() => {
@@ -339,36 +358,36 @@ class ApiService {
     return promise;
   }
 
-  async login(password: string): Promise<{ token: string; expiresAt: number }> {
+  async login(password: string): Promise<LoginResponse> {
     if (!password || password.trim().length === 0) {
       throw new Error('Password is required');
     }
 
     try {
       const response = await this.withRetry(() => 
-        this.api.post('/auth/login', { password: password.trim() })
+        this.api.post<LoginResponse>('/auth/login', { password: password.trim() })
       );
       
       this.clearCache();
       return response.data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
-  async getHealth(): Promise<{ status: string; stats: SystemStats }> {
+  async getHealth(): Promise<HealthResponse> {
     const cacheKey = this.getCacheKey('/health');
     const cached = this.getCache(cacheKey);
-    if (cached) return cached.data;
+    if (cached) return cached.data as HealthResponse;
 
     try {
-      const response = await this.api.get('/health');
+      const response = await this.api.get<HealthResponse>('/health');
       const data = response.data;
       
       this.setCache(cacheKey, data, this.CACHE_SHORT_TTL);
       return data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
@@ -389,31 +408,26 @@ class ApiService {
 
     try {
       const response = await this.withRetry(() => 
-        this.api.post('/keys', payload)
+        this.api.post<ApiResponse<APIKey>>('/keys', payload)
       );
       this.invalidateCache('/keys');
       return response.data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
-  async getKeys(params?: {
-    page?: number;
-    limit?: number;
-    filter?: string;
-    search?: string;
-  }, useCache: boolean = true): Promise<ApiResponse<APIKey[]>> {
+  async getKeys(params?: GetKeysParams, useCache: boolean = true): Promise<ApiResponse<APIKey[]>> {
     const cacheKey = this.getCacheKey('/keys', params);
     
     if (useCache) {
       const cached = this.getCache(cacheKey);
-      if (cached) return cached.data;
+      if (cached) return cached.data as ApiResponse<APIKey[]>;
     }
 
     try {
       const response = await this.withDeduplication(cacheKey, () =>
-        this.withRetry(() => this.api.get('/keys', { params }))
+        this.withRetry(() => this.api.get<ApiResponse<APIKey[]>>('/keys', { params }))
       );
       const data = response.data;
       
@@ -423,7 +437,7 @@ class ApiService {
       
       return data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
@@ -434,18 +448,18 @@ class ApiService {
 
     const cacheKey = this.getCacheKey(`/keys/${id}`);
     const cached = this.getCache(cacheKey);
-    if (cached) return cached.data;
+    if (cached) return cached.data as ApiResponse<APIKey>;
 
     try {
       const response = await this.withRetry(() => 
-        this.api.get(`/keys/${id.trim()}`)
+        this.api.get<ApiResponse<APIKey>>(`/keys/${id.trim()}`)
       );
       const data = response.data;
       
       this.setCache(cacheKey, data);
       return data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
@@ -464,64 +478,58 @@ class ApiService {
 
     try {
       const response = await this.withRetry(() => 
-        this.api.put(`/keys/${id.trim()}`, payload),
+        this.api.put<ApiResponse<APIKey>>(`/keys/${id.trim()}`, payload),
         { attempts: 2 }
       );
       this.invalidateCache('/keys');
       this.invalidateCache(`/keys/${id}`);
       return response.data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
-  async deleteKey(id: string): Promise<{ message: string }> {
+  async deleteKey(id: string): Promise<{ message: string; success: boolean; timestamp: string }> {
     if (!id || id.trim().length === 0) {
       throw new Error('API key ID is required');
     }
 
     try {
       const response = await this.withRetry(() => 
-        this.api.delete(`/keys/${id.trim()}`),
+        this.api.delete<{ message: string; success: boolean; timestamp: string }>(`/keys/${id.trim()}`),
         { attempts: 2 }
       );
       this.invalidateCache('/keys');
       this.invalidateCache(`/keys/${id}`);
       return response.data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
-  async cleanExpiredKeys(): Promise<{ message: string; count?: number }> {
+  async cleanExpiredKeys(): Promise<{ message: string; count?: number; success: boolean; timestamp: string }> {
     try {
       const response = await this.withRetry(() => 
-        this.api.post('/keys/clean')
+        this.api.post<{ message: string; count?: number; success: boolean; timestamp: string }>('/keys/clean')
       );
       this.invalidateCache('/keys');
       return response.data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
-  async getLogs(params?: {
-    page?: number;
-    limit?: number;
-    level?: string;
-    component?: string;
-    search?: string;
-  }, useCache: boolean = false): Promise<ApiResponse<LogEntry[]>> {
+  async getLogs(params?: GetLogsParams, useCache: boolean = false): Promise<ApiResponse<LogEntry[]>> {
     const cacheKey = this.getCacheKey('/logs', params);
     
     if (useCache) {
       const cached = this.getCache(cacheKey);
-      if (cached) return cached.data;
+      if (cached) return cached.data as ApiResponse<LogEntry[]>;
     }
 
     try {
       const response = await this.withRetry(() => 
-        this.api.get('/logs', { params })
+        this.api.get<ApiResponse<LogEntry[]>>('/logs', { params })
       );
       const data = response.data;
       
@@ -531,7 +539,7 @@ class ApiService {
       
       return data;
     } catch (error) {
-      throw this.handleError(error);
+      throw this.handleError(error as AxiosError);
     }
   }
 
@@ -589,14 +597,14 @@ class ApiService {
   getRequestConfig(): {
     baseURL: string;
     timeout: number;
-    headers: any;
+    headers: Record<string, string>;
     circuitBreaker: CircuitBreakerState;
     cacheStats: ReturnType<typeof this.getCacheStats>;
   } {
     return {
       baseURL: this.api.defaults.baseURL || '',
       timeout: this.api.defaults.timeout || 0,
-      headers: this.api.defaults.headers,
+      headers: this.api.defaults.headers as Record<string, string>,
       circuitBreaker: this.circuitBreaker,
       cacheStats: this.getCacheStats()
     };

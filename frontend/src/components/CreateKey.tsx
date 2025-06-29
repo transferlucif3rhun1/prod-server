@@ -106,7 +106,7 @@ const CreateKey: React.FC = () => {
       newErrors.totalRequests = 'Total requests must be 0 or greater (0 = unlimited)';
     }
 
-    if (!formData.expirationValue || parseInt(formData.expirationValue) < 1) {
+    if (!formData.expirationValue || parseInt(formData.expirationValue, 10) < 1) {
       newErrors.expiration = 'Expiration value must be at least 1';
     }
 
@@ -121,12 +121,7 @@ const CreateKey: React.FC = () => {
   const handleInputChange = (field: keyof FormData, value: string | number) => {
     setFormData(prev => ({
       ...prev,
-      [field]: value,
-      ...(field === 'expirationValue' || field === 'expirationUnit' 
-        ? { expiration: field === 'expirationValue' 
-            ? value + prev.expirationUnit 
-            : prev.expirationValue + value }
-        : {})
+      [field]: value
     }));
 
     if (errors[field]) {
@@ -169,7 +164,12 @@ const CreateKey: React.FC = () => {
       }));
       setErrors({});
     } catch (error: any) {
-      toast.error(error.response?.data?.error || 'Failed to create API key');
+      if (error.response?.data?.errors) {
+        setErrors(error.response.data.errors);
+        toast.error('Please fix the form errors');
+      } else {
+        toast.error(error.response?.data?.error || 'Failed to create API key');
+      }
     } finally {
       setIsLoading(false);
     }

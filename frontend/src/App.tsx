@@ -99,7 +99,7 @@ const App: React.FC = () => {
     if (typeof window !== 'undefined') {
       const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
       const handleThemeChange = (e: MediaQueryListEvent) => {
-        if (!localStorage.getItem('theme')) {
+        if (localStorage.getItem('theme') === null) {
           if (e.matches) {
             document.documentElement.classList.add('dark');
           } else {
@@ -126,27 +126,32 @@ const App: React.FC = () => {
   }, [isConnected, updateConnectionStatus]);
 
   useEffect(() => {
-    if (isAuthenticated) {
-      const connectionStatus = getConnectionStatus();
-      
-      if (connectionState === 'connected') {
-        toast.dismiss('ws-status');
+    if (!isAuthenticated) return;
+
+    const connectionStatus = getConnectionStatus();
+    const toastId = 'ws-status';
+
+    switch (connectionState) {
+      case 'connected':
+        toast.dismiss(toastId);
         toast.success('Real-time connection established', { 
-          id: 'ws-status',
+          id: toastId,
           duration: 2000
         });
-      } else if (connectionState === 'reconnecting') {
-        toast.dismiss('ws-status');
+        break;
+      case 'reconnecting':
         toast.loading(`Reconnecting... (${connectionStatus.reconnectAttempts}/${connectionStatus.maxReconnectAttempts})`, { 
-          id: 'ws-status'
+          id: toastId
         });
-      } else if (connectionState === 'disconnected' && connectionStatus.reconnectAttempts > 0) {
-        toast.dismiss('ws-status');
-        toast.error('Real-time connection lost', { 
-          id: 'ws-status',
-          duration: 5000
-        });
-      }
+        break;
+      case 'disconnected':
+        if (connectionStatus.reconnectAttempts > 0) {
+          toast.error('Real-time connection lost', { 
+            id: toastId,
+            duration: 5000
+          });
+        }
+        break;
     }
   }, [connectionState, isAuthenticated, getConnectionStatus]);
 
