@@ -27,6 +27,7 @@ import { LogEntry } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
+import { LoadingSpinner, ActionButton, MetricCard } from '../components/shared';
 import toast from 'react-hot-toast';
 import { format, formatDistanceToNow } from 'date-fns';
 
@@ -311,12 +312,7 @@ const Logs: React.FC = () => {
   };
 
   if (logsLoading && (!logs || logs.length === 0)) {
-    return (
-      <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-        <p className="text-gray-600 dark:text-gray-400">Loading system logs...</p>
-      </div>
-    );
+    return <LoadingSpinner message="Loading system logs..." />;
   }
 
   return (
@@ -367,41 +363,35 @@ const Logs: React.FC = () => {
             </span>
           </div>
 
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <ActionButton
             onClick={toggleStreaming}
-            className={`px-4 py-2 rounded-lg transition-colors text-sm flex items-center space-x-2 ${
-              isStreaming 
-                ? 'bg-green-600 hover:bg-green-700 text-white' 
-                : 'bg-gray-600 hover:bg-gray-700 text-white'
-            }`}
+            variant={isStreaming ? 'success' : 'secondary'}
+            size="sm"
+            icon={isStreaming ? Pause : Play}
           >
-            {isStreaming ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
-            <span>{isStreaming ? 'Pause' : 'Stream'}</span>
-          </motion.button>
+            {isStreaming ? 'Pause' : 'Stream'}
+          </ActionButton>
 
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <ActionButton
             onClick={exportLogs}
             disabled={filteredLogs.length === 0}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
+            variant="primary"
+            size="sm"
+            icon={Download}
           >
-            <Download className="w-4 h-4" />
-            <span>Export</span>
-          </motion.button>
+            Export
+          </ActionButton>
 
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <ActionButton
             onClick={refreshLogs}
             disabled={logsLoading}
-            className="px-4 py-2 bg-purple-600 hover:bg-purple-700 disabled:bg-purple-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
+            variant="secondary"
+            size="sm"
+            icon={RefreshCw}
+            loading={logsLoading}
           >
-            <RefreshCw className={`w-4 h-4 ${logsLoading ? 'animate-spin' : ''}`} />
-            <span>Refresh</span>
-          </motion.button>
+            Refresh
+          </ActionButton>
         </div>
       </div>
 
@@ -450,12 +440,9 @@ const Logs: React.FC = () => {
               </div>
 
               <div className="flex items-end">
-                <button
-                  onClick={clearFilters}
-                  className="px-4 py-2 bg-gray-600 hover:bg-gray-700 text-white rounded-lg transition-colors text-sm"
-                >
+                <ActionButton onClick={clearFilters} variant="secondary" size="sm">
                   Clear Filters
-                </button>
+                </ActionButton>
               </div>
             </div>
           </motion.div>
@@ -465,28 +452,16 @@ const Logs: React.FC = () => {
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
         {getLevelStats().map(({ level, count }) => {
           const IconComponent = getLogIcon(level);
+          const color = level === 'INFO' ? 'blue' : level === 'WARN' ? 'yellow' : level === 'ERROR' ? 'red' : 'gray';
           
           return (
-            <motion.div
+            <MetricCard
               key={level}
-              whileHover={{ scale: 1.02 }}
-              className="bg-white dark:bg-gray-800 rounded-xl p-4 border border-gray-200 dark:border-gray-700"
-            >
-              <div className="flex items-center space-x-3">
-                <div className={`p-2 rounded-lg ${
-                  level === 'INFO' ? 'bg-blue-100 dark:bg-blue-900/20' :
-                  level === 'WARN' ? 'bg-yellow-100 dark:bg-yellow-900/20' :
-                  level === 'ERROR' ? 'bg-red-100 dark:bg-red-900/20' :
-                  'bg-gray-100 dark:bg-gray-900/20'
-                }`}>
-                  <IconComponent className={`w-4 h-4 ${getLogTextColors(level)}`} />
-                </div>
-                <div>
-                  <p className="text-sm text-gray-600 dark:text-gray-400">{level}</p>
-                  <p className="text-lg font-semibold text-gray-900 dark:text-white">{count.toLocaleString()}</p>
-                </div>
-              </div>
-            </motion.div>
+              icon={IconComponent}
+              label={level}
+              value={count.toLocaleString()}
+              color={color}
+            />
           );
         })}
       </div>
@@ -621,22 +596,15 @@ const Logs: React.FC = () => {
 
           {hasMore && (
             <div className="text-center py-4">
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
+              <ActionButton
                 onClick={loadMore}
                 disabled={logsLoading}
-                className="px-6 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2 mx-auto"
+                variant="primary"
+                size="sm"
+                loading={logsLoading}
               >
-                {logsLoading ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 animate-spin" />
-                    <span>Loading...</span>
-                  </>
-                ) : (
-                  <span>Load More</span>
-                )}
-              </motion.button>
+                Load More
+              </ActionButton>
             </div>
           )}
 

@@ -7,18 +7,15 @@ import {
   FileText,
   LogOut,
   Menu,
-  X,
   Sun,
   Moon,
   Activity,
-  Users,
   Clock,
   Database,
   Wifi,
   WifiOff,
   Zap,
-  TrendingUp,
-  Server
+  TrendingUp
 } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -43,35 +40,7 @@ interface NavigationItem {
   description: string;
 }
 
-interface NavigationItemProps {
-  item: NavigationItem;
-  isActive: boolean;
-  sidebarCollapsed: boolean;
-}
-
-interface SidebarProps {
-  sidebarCollapsed: boolean;
-  setSidebarCollapsed: (collapsed: boolean) => void;
-  navigation: NavigationItem[];
-  location: { pathname: string };
-  stats: SystemStats | null;
-  isStatsLoading: boolean;
-  apiKeys: APIKey[];
-  isDarkMode: boolean;
-  toggleTheme: () => void;
-  isConnected: boolean;
-  handleLogout: () => void;
-}
-
-interface TopBarProps {
-  pageTitle: string;
-  pageDescription: string;
-  apiKeys: APIKey[];
-  getActiveKeysCount: () => number;
-  getExpiredKeysCount: () => number;
-  setSidebarCollapsed: (collapsed: boolean) => void;
-}
-
+ 
 const MetricCard = memo<MetricCardProps>(({ icon: Icon, label, value, trend, color = 'blue', isLoading = false }) => (
   <motion.div
     whileHover={{ scale: 1.02 }}
@@ -103,7 +72,8 @@ const MetricCard = memo<MetricCardProps>(({ icon: Icon, label, value, trend, col
 
 MetricCard.displayName = 'MetricCard';
 
-const NavigationItem = memo<NavigationItemProps>(({ item, isActive, sidebarCollapsed }) => {
+ 
+const NavigationItem = memo<{ item: NavigationItem; isActive: boolean; sidebarCollapsed: boolean }>(({ item, isActive, sidebarCollapsed }) => {
   const Icon = item.icon;
   
   return (
@@ -146,7 +116,20 @@ const NavigationItem = memo<NavigationItemProps>(({ item, isActive, sidebarColla
 
 NavigationItem.displayName = 'NavigationItem';
 
-const Sidebar = memo<SidebarProps>(({ 
+ 
+const Sidebar = memo<{
+  sidebarCollapsed: boolean;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+  navigation: NavigationItem[];
+  location: { pathname: string };
+  stats: SystemStats | null;
+  isStatsLoading: boolean;
+  apiKeys: APIKey[];
+  isDarkMode: boolean;
+  toggleTheme: () => void;
+  isConnected: boolean;
+  handleLogout: () => void;
+}>(({ 
   sidebarCollapsed, 
   setSidebarCollapsed, 
   navigation, 
@@ -324,7 +307,15 @@ const Sidebar = memo<SidebarProps>(({
 
 Sidebar.displayName = 'Sidebar';
 
-const TopBar = memo<TopBarProps>(({ pageTitle, pageDescription, apiKeys, getActiveKeysCount, getExpiredKeysCount, setSidebarCollapsed }) => (
+ 
+const TopBar = memo<{
+  pageTitle: string;
+  pageDescription: string;
+  apiKeys: APIKey[];
+  getActiveKeysCount: () => number;
+  getExpiredKeysCount: () => number;
+  setSidebarCollapsed: (collapsed: boolean) => void;
+}>(({ pageTitle, pageDescription, apiKeys, getActiveKeysCount, getExpiredKeysCount, setSidebarCollapsed }) => (
   <header className="bg-white dark:bg-gray-800 shadow-sm border-b border-gray-200 dark:border-gray-700 px-6 py-4">
     <div className="flex items-center justify-between">
       <div>

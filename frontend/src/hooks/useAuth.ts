@@ -3,6 +3,14 @@ import { persist } from 'zustand/middleware';
 import apiService from '../services/api';
 import { AuthState } from '../types';
 
+interface ApiError {
+  response?: {
+    data?: {
+      error?: string;
+    };
+  };
+}
+
 export const useAuth = create<AuthState>()(
   persist(
     (set) => ({
@@ -15,8 +23,9 @@ export const useAuth = create<AuthState>()(
           localStorage.setItem('token', response.token);
           set({ isAuthenticated: true, token: response.token });
           return true;
-        } catch (error: any) {
-          const errorMessage = error.response?.data?.error || 'Login failed';
+        } catch (error: unknown) {
+          const apiError = error as ApiError;
+          const errorMessage = apiError.response?.data?.error || 'Login failed';
           console.error('Login failed:', errorMessage);
           return false;
         }

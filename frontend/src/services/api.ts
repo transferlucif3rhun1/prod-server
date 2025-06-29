@@ -4,9 +4,7 @@ import {
   CreateKeyRequest, 
   UpdateKeyRequest, 
   LogEntry, 
-  SystemStats, 
   ApiResponse,
-  PaginationInfo,
   HealthResponse,
   LoginResponse
 } from '../types';
@@ -171,7 +169,7 @@ class ApiService {
           this.circuitBreaker.failures = 0;
           console.log('Circuit breaker closed - service recovered');
         }
-      } catch (error) {
+      } catch {
         console.log('Health check failed');
       }
     }, 60000);
@@ -269,6 +267,17 @@ class ApiService {
 
   private getCacheItem(url: string, params?: unknown): CacheItem | null {
     const key = this.getCacheKey(url, params);
+    const item = this.cache.get(key);
+    if (item && this.isValidCache(item)) {
+      return item;
+    }
+    if (item) {
+      this.cache.delete(key);
+    }
+    return null;
+  }
+
+  private getCache(key: string): CacheItem | null {
     const item = this.cache.get(key);
     if (item && this.isValidCache(item)) {
       return item;
@@ -588,8 +597,8 @@ class ApiService {
     try {
       await this.api.get('/health', { timeout: 5000 });
       return true;
-    } catch (error) {
-      console.error('Connection test failed:', error);
+    } catch {
+      console.error('Connection test failed');
       return false;
     }
   }

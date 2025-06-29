@@ -13,21 +13,17 @@ import {
   Activity,
   Users,
   Zap,
-  AlertCircle,
   Plus,
   X,
   Clock,
   Grid,
-  List,
-  WifiOff,
-  Info,
-  AlertTriangle,
-  Bug
+  List
 } from 'lucide-react';
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
 import { copyToClipboard } from '../utils';
+import { LoadingSpinner, ErrorDisplay, ActionButton, StatusBadge, EmptyState, formatValue, formatUsageDisplay } from './shared';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 
@@ -38,35 +34,6 @@ interface EditFormData {
   totalRequests: number;
   isActive: boolean;
 }
-
-const logColors = {
-  INFO: 'border-l-blue-500 bg-blue-50 dark:bg-blue-900/20',
-  WARN: 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-900/20',
-  ERROR: 'border-l-red-500 bg-red-50 dark:bg-red-900/20',
-  DEBUG: 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20'
-};
-
-const logTextColors = {
-  INFO: 'text-blue-800 dark:text-blue-400',
-  WARN: 'text-yellow-800 dark:text-yellow-400',
-  ERROR: 'text-red-800 dark:text-red-400',
-  DEBUG: 'text-gray-800 dark:text-gray-400'
-};
-
-const getLogIcon = (level: string) => {
-  switch (level) {
-    case 'INFO':
-      return Info;
-    case 'WARN':
-      return AlertTriangle;
-    case 'ERROR':
-      return AlertCircle;
-    case 'DEBUG':
-      return Bug;
-    default:
-      return Info;
-  }
-};
 
 const ManageKeys: React.FC = () => {
   const { 
@@ -213,13 +180,6 @@ const ManageKeys: React.FC = () => {
       default: 
         return 'bg-gray-100 text-gray-800 dark:bg-gray-900/20 dark:text-gray-400';
     }
-  }, []);
-
-  const formatValue = useCallback((value: number): string => {
-    if (value === 0) {
-      return 'Unlimited';
-    }
-    return value.toLocaleString();
   }, []);
 
   const handleCopyToClipboard = useCallback(async (text: string, keyId: string) => {
@@ -441,86 +401,23 @@ const ManageKeys: React.FC = () => {
     return safeApiKeys.filter(key => new Date(key.expiration) <= now).length;
   };
 
-  const calculateUsagePercentage = (used: number, total: number) => {
-    if (total === 0) return 0;
-    return Math.min((used / total) * 100, 100);
-  };
-
-  const formatUsageDisplay = useCallback((used: number, total: number) => {
-    if (total === 0) {
-      return {
-        text: `${used.toLocaleString()} used`,
-        subtext: 'Unlimited available',
-        percentage: null,
-        isUnlimited: true
-      };
-    }
-    
-    const percentage = calculateUsagePercentage(used, total);
-    return {
-      text: `${used.toLocaleString()}/${total.toLocaleString()}`,
-      subtext: `${percentage.toFixed(1)}% used`,
-      percentage: percentage,
-      isUnlimited: false
-    };
-  }, []);
-
   const totalPages = Math.ceil(filteredKeys.length / itemsPerPage);
   const startIndex = (currentPage - 1) * itemsPerPage;
   const paginatedKeys = filteredKeys.slice(startIndex, startIndex + itemsPerPage);
 
   if (keysLoading && (!apiKeys || apiKeys.length === 0)) {
-    return (
-      <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-        <p className="text-gray-600 dark:text-gray-400">Loading your API keys...</p>
-        {retryAttempts > 0 && (
-          <p className="text-sm text-gray-500 dark:text-gray-500">
-            Retry attempt {retryAttempts}/3
-          </p>
-        )}
-      </div>
-    );
+    return <LoadingSpinner message="Loading your API keys..." />;
   }
 
   if (keysError && (!apiKeys || apiKeys.length === 0)) {
     return (
-      <div className="flex flex-col items-center justify-center h-64 space-y-4">
-        <div className="p-4 bg-red-100 dark:bg-red-900/20 rounded-lg text-center max-w-md">
-          <AlertCircle className="w-8 h-8 text-red-600 dark:text-red-400 mx-auto mb-2" />
-          <p className="text-red-800 dark:text-red-400 font-medium">Unable to Load API Keys</p>
-          <p className="text-red-600 dark:text-red-500 text-sm mt-1">{keysError}</p>
-          {offlineMode && (
-            <div className="flex items-center justify-center mt-2 text-sm text-gray-600 dark:text-gray-400">
-              <WifiOff className="w-4 h-4 mr-1" />
-              <span>You appear to be offline</span>
-            </div>
-          )}
-        </div>
-        <div className="flex space-x-3">
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => fetchKeys(false)}
-            disabled={keysLoading}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2 disabled:opacity-50"
-          >
-            <RefreshCw className={`w-4 h-4 ${keysLoading ? 'animate-spin' : ''}`} />
-            <span>Try Again</span>
-          </motion.button>
-          {retryAttempts > 0 && (
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => window.location.href = '/create'}
-              className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-colors flex items-center space-x-2"
-            >
-              <Plus className="w-4 h-4" />
-              <span>Create New Key</span>
-            </motion.button>
-          )}
-        </div>
-      </div>
+      <ErrorDisplay
+        title="Unable to Load API Keys"
+        message={keysError}
+        showOfflineIndicator={offlineMode}
+        onRetry={() => fetchKeys(false)}
+        retryLabel="Try Again"
+      />
     );
   }
 
@@ -717,38 +614,36 @@ const ManageKeys: React.FC = () => {
             )}
           </AnimatePresence>
 
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <ActionButton
             onClick={exportKeys}
             disabled={filteredKeys.length === 0}
-            className="px-4 py-2 bg-gray-600 hover:bg-gray-700 disabled:bg-gray-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
+            variant="secondary"
+            size="sm"
+            icon={Download}
           >
-            <Download className="w-4 h-4" />
-            <span>Export</span>
-          </motion.button>
+            Export
+          </ActionButton>
 
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <ActionButton
             onClick={handleCleanExpired}
             disabled={getExpiredKeysCount() === 0}
-            className="px-4 py-2 bg-yellow-600 hover:bg-yellow-700 disabled:bg-yellow-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
+            variant="secondary"
+            size="sm"
+            icon={RefreshCw}
           >
-            <RefreshCw className="w-4 h-4" />
-            <span>Clean Expired</span>
-          </motion.button>
+            Clean Expired
+          </ActionButton>
 
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
+          <ActionButton
             onClick={() => fetchKeys(false)}
             disabled={keysLoading}
-            className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
+            variant="primary"
+            size="sm"
+            icon={RefreshCw}
+            loading={keysLoading}
           >
-            <RefreshCw className={`w-4 h-4 ${keysLoading ? 'animate-spin' : ''}`} />
-            <span>Refresh</span>
-          </motion.button>
+            Refresh
+          </ActionButton>
         </div>
       </div>
 
@@ -784,9 +679,9 @@ const ManageKeys: React.FC = () => {
                       </div>
                     </div>
                     <div className="flex items-center space-x-2">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatusColor(getKeyStatus(key))}`}>
+                      <StatusBadge status={getKeyStatus(key) as 'active' | 'expired' | 'inactive'}>
                         {getKeyStatus(key)}
-                      </span>
+                      </StatusBadge>
                       <div className="action-menu-container relative">
                         <button
                           onClick={() => setActionMenuKey(actionMenuKey === key.id ? null : key.id)}
@@ -896,34 +791,13 @@ const ManageKeys: React.FC = () => {
           )}
         </div>
       ) : (
-        <div className="text-center py-12">
-          <div className="space-y-4">
-            <div className="text-gray-500 dark:text-gray-400">
-              {searchTerm || filterStatus !== 'all' ? (
-                <div>
-                  <p className="text-lg font-medium mb-2">No keys match your filters</p>
-                  <p className="text-sm">Try adjusting your search or filter criteria</p>
-                </div>
-              ) : (
-                <div>
-                  <p className="text-lg font-medium mb-2">No API keys found</p>
-                  <p className="text-sm">Create your first API key to get started</p>
-                </div>
-              )}
-            </div>
-            {(!searchTerm && filterStatus === 'all') && (
-              <motion.button
-                whileHover={{ scale: 1.05 }}
-                whileTap={{ scale: 0.95 }}
-                onClick={() => window.location.href = '/create'}
-                className="mt-4 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-flex items-center space-x-2"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Create your first API key</span>
-              </motion.button>
-            )}
-          </div>
-        </div>
+        <EmptyState
+          title={searchTerm || filterStatus !== 'all' ? 'No keys match your filters' : 'No API keys found'}
+          description={searchTerm || filterStatus !== 'all' ? 'Try adjusting your search or filter criteria' : 'Create your first API key to get started'}
+          actionLabel={(!searchTerm && filterStatus === 'all') ? 'Create your first API key' : undefined}
+          onAction={(!searchTerm && filterStatus === 'all') ? () => window.location.href = '/create' : undefined}
+          icon={Plus}
+        />
       )}
     </div>
   );

@@ -150,7 +150,7 @@ const CreateKey: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const { expirationValue, expirationUnit, ...submitData } = formData;
+      const { expirationValue: _expirationValue, expirationUnit: _expirationUnit, ...submitData } = formData;
       const response = await apiService.createKey(submitData);
       
       setCreatedKey(response.data);

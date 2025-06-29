@@ -12,6 +12,11 @@ interface WebSocketMetrics {
   connectionUptime: number;
 }
 
+interface MessagePayload {
+  type: string;
+  timestamp: string;
+}
+
 export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
@@ -63,20 +68,20 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         case 'key_created':
           if (event.data) {
             addApiKey(event.data as APIKey);
-            toast.success(`New API key created: ${event.data.name || 'Untitled'}`);
+            toast.success(`New API key created: ${(event.data as APIKey).name || 'Untitled'}`);
           }
           break;
 
         case 'key_updated':
           if (event.data) {
             updateApiKey(event.data as APIKey);
-            toast.success(`API key updated: ${event.data.name || 'Untitled'}`);
+            toast.success(`API key updated: ${(event.data as APIKey).name || 'Untitled'}`);
           }
           break;
 
         case 'key_deleted':
-          if (event.data?.id) {
-            removeApiKey(event.data.id);
+          if (event.data && typeof event.data === 'object' && 'id' in event.data) {
+            removeApiKey((event.data as { id: string }).id);
             toast.success('API key deleted');
           }
           break;
@@ -88,8 +93,8 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           break;
 
         case 'system_update':
-          if (event.data?.message) {
-            toast.success(event.data.message);
+          if (event.data && typeof event.data === 'object' && 'message' in event.data) {
+            toast.success((event.data as { message: string }).message);
           }
           break;
 
@@ -97,11 +102,12 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           break;
 
         case 'error':
-          if (event.data?.message) {
-            toast.error(event.data.message);
+          if (event.data && typeof event.data === 'object' && 'message' in event.data) {
+            const errorMessage = (event.data as { message: string }).message;
+            toast.error(errorMessage);
             updateMetrics({ 
               totalErrors: metrics.totalErrors + 1,
-              lastError: event.data.message 
+              lastError: errorMessage 
             });
           }
           break;
@@ -143,10 +149,11 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     heartbeatInterval.current = setInterval(() => {
       if (ws.current?.readyState === WebSocket.OPEN) {
         try {
-          ws.current.send(JSON.stringify({
+          const heartbeatMessage: MessagePayload = {
             type: 'ping',
             timestamp: new Date().toISOString()
-          }));
+          };
+          ws.current.send(JSON.stringify(heartbeatMessage));
         } catch (error) {
           console.error('Failed to send heartbeat:', error);
         }
@@ -339,7 +346,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     updateConnectionStatus({ websocket: false });
   }, [cleanup, updateConnectionStatus]);
 
-  const sendMessage = useCallback((message: any) => {
+  const sendMessage = useCallback((message: MessagePayload) => {
     if (ws.current?.readyState === WebSocket.OPEN) {
       try {
         ws.current.send(JSON.stringify(message));
@@ -354,7 +361,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       }
     } else {
       if (messageQueue.current.length < maxMessageQueueSize) {
-        messageQueue.current.push(message);
+        messageQueue.current.push(message as WSEvent);
         console.log('Message queued for sending when connection is available');
       } else {
         console.warn('Message queue full, dropping message');
