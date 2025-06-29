@@ -51,16 +51,16 @@ const App: React.FC = () => {
     try {
       switch (event.type) {
         case 'system_update':
-          if (event.data?.message) {
-            toast.success(event.data.message, { 
+          if (event.data && typeof event.data === 'object' && 'message' in event.data) {
+            toast.success(String(event.data.message), { 
               duration: 4000,
               id: 'system-update'
             });
           }
           break;
         case 'error':
-          if (event.data?.message) {
-            toast.error(event.data.message, {
+          if (event.data && typeof event.data === 'object' && 'message' in event.data) {
+            toast.error(String(event.data.message), {
               duration: 5000,
               id: 'system-error'
             });
@@ -159,12 +159,13 @@ const App: React.FC = () => {
     const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
       console.error('Unhandled promise rejection:', event.reason);
       
-      if (event.reason?.message?.includes('401') || event.reason?.message?.includes('Unauthorized')) {
+      const reason = event.reason as Error;
+      if (reason?.message?.includes('401') || reason?.message?.includes('Unauthorized')) {
         toast.error('Your session has expired. Please log in again.');
         setTimeout(() => {
           window.location.href = '/login';
         }, 2000);
-      } else if (event.reason?.message?.includes('Network Error')) {
+      } else if (reason?.message?.includes('Network Error')) {
         toast.error('Network connection problem. Please check your internet connection.');
       } else {
         toast.error('An unexpected error occurred. Please try again.');
@@ -176,7 +177,8 @@ const App: React.FC = () => {
     const handleError = (event: ErrorEvent) => {
       console.error('Global error:', event.error);
       
-      if (event.error?.message?.includes('ChunkLoadError')) {
+      const error = event.error as Error;
+      if (error?.message?.includes('ChunkLoadError')) {
         toast.error('Unable to load application components. Please refresh the page.');
       }
     };
@@ -241,8 +243,8 @@ const App: React.FC = () => {
       console.error('Failed to store error data:', storageError);
     }
 
-    if (typeof window !== 'undefined' && (window as any).gtag) {
-      (window as any).gtag('event', 'exception', {
+    if (typeof window !== 'undefined' && (window as unknown as { gtag?: (...args: unknown[]) => void }).gtag) {
+      (window as unknown as { gtag: (...args: unknown[]) => void }).gtag('event', 'exception', {
         description: error.message,
         fatal: true
       });

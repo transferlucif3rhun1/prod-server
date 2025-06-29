@@ -5,7 +5,7 @@ import { AuthState } from '../types';
 
 export const useAuth = create<AuthState>()(
   persist(
-    (set, get) => ({
+    (set) => ({
       isAuthenticated: !!localStorage.getItem('token'),
       token: localStorage.getItem('token'),
 
@@ -14,11 +14,11 @@ export const useAuth = create<AuthState>()(
           const response = await apiService.login(password);
           localStorage.setItem('token', response.token);
           set({ isAuthenticated: true, token: response.token });
-          return { success: true };
+          return true;
         } catch (error: any) {
           const errorMessage = error.response?.data?.error || 'Login failed';
           console.error('Login failed:', errorMessage);
-          return { success: false, error: errorMessage };
+          return false;
         }
       },
 

@@ -33,8 +33,7 @@ import { format, formatDistanceToNow } from 'date-fns';
 const Logs: React.FC = () => {
   const { 
     logs, 
-    logsLoading, 
-    logsError,
+    logsLoading,
     setLogs, 
     addLog, 
     setLogsLoading, 
@@ -61,29 +60,6 @@ const Logs: React.FC = () => {
 
   const logLevels = ['all', 'INFO', 'WARN', 'ERROR', 'DEBUG'];
 
-  const logLevelConfig = {
-    INFO: {
-      icon: Info,
-      color: 'border-l-blue-500 bg-blue-50 dark:bg-blue-900/20',
-      textColor: 'text-blue-800 dark:text-blue-400'
-    },
-    WARN: {
-      icon: AlertTriangle,
-      color: 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-900/20',
-      textColor: 'text-yellow-800 dark:text-yellow-400'
-    },
-    ERROR: {
-      icon: AlertCircle,
-      color: 'border-l-red-500 bg-red-50 dark:bg-red-900/20',
-      textColor: 'text-red-800 dark:text-red-400'
-    },
-    DEBUG: {
-      icon: Bug,
-      color: 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20',
-      textColor: 'text-gray-800 dark:text-gray-400'
-    }
-  };
-
   useEffect(() => {
     fetchLogs();
   }, []);
@@ -96,7 +72,7 @@ const Logs: React.FC = () => {
     if (autoScroll && logsEndRef.current && logs.length > 0) {
       logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [filteredLogs, autoScroll]);
+  }, [filteredLogs, autoScroll, logs.length]);
 
   useEffect(() => {
     const safeLogsList = Array.isArray(logs) ? logs : [];
@@ -112,7 +88,7 @@ const Logs: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
-  function handleWebSocketMessage(event: any) {
+  function handleWebSocketMessage(event: { type: string; data?: LogEntry }) {
     if (isStreaming && event.type === 'log_entry' && event.data) {
       addLog(event.data);
       setLastUpdateTime(new Date());
@@ -124,7 +100,7 @@ const Logs: React.FC = () => {
       if (!append) setLogsLoading(true);
       setLogsError(null);
       
-      const params: any = {
+      const params: Record<string, string | number> = {
         page: pageNum,
         limit: 100,
       };
@@ -151,8 +127,8 @@ const Logs: React.FC = () => {
       if (logsData.length === 0 && pageNum === 1) {
         toast.info('No logs found matching your criteria');
       }
-    } catch (error: any) {
-      const errorMessage = error.response?.data?.error || 'Failed to load logs. Please try again.';
+    } catch (error: unknown) {
+      const errorMessage = error instanceof Error ? error.message : 'Failed to load logs. Please try again.';
       setLogsError(errorMessage);
       toast.error(errorMessage);
       console.error('Failed to fetch logs:', error);
@@ -287,6 +263,51 @@ const Logs: React.FC = () => {
       date: format(date, 'MMM dd'),
       relative: formatDistanceToNow(date, { addSuffix: true })
     };
+  };
+
+  const getLogIcon = (level: string) => {
+    switch (level) {
+      case 'INFO':
+        return Info;
+      case 'WARN':
+        return AlertTriangle;
+      case 'ERROR':
+        return AlertCircle;
+      case 'DEBUG':
+        return Bug;
+      default:
+        return Info;
+    }
+  };
+
+  const getLogColors = (level: string) => {
+    switch (level) {
+      case 'INFO':
+        return 'border-l-blue-500 bg-blue-50 dark:bg-blue-900/20';
+      case 'WARN':
+        return 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-900/20';
+      case 'ERROR':
+        return 'border-l-red-500 bg-red-50 dark:bg-red-900/20';
+      case 'DEBUG':
+        return 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20';
+      default:
+        return 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20';
+    }
+  };
+
+  const getLogTextColors = (level: string) => {
+    switch (level) {
+      case 'INFO':
+        return 'text-blue-800 dark:text-blue-400';
+      case 'WARN':
+        return 'text-yellow-800 dark:text-yellow-400';
+      case 'ERROR':
+        return 'text-red-800 dark:text-red-400';
+      case 'DEBUG':
+        return 'text-gray-800 dark:text-gray-400';
+      default:
+        return 'text-gray-800 dark:text-gray-400';
+    }
   };
 
   if (logsLoading && (!logs || logs.length === 0)) {
@@ -458,7 +479,7 @@ const Logs: React.FC = () => {
                   level === 'ERROR' ? 'bg-red-100 dark:bg-red-900/20' :
                   'bg-gray-100 dark:bg-gray-900/20'
                 }`}>
-                  <IconComponent className={`w-4 h-4 ${logTextColors[level as keyof typeof logTextColors] || 'text-gray-600 dark:text-gray-400'}`} />
+                  <IconComponent className={`w-4 h-4 ${getLogTextColors(level)}`} />
                 </div>
                 <div>
                   <p className="text-sm text-gray-600 dark:text-gray-400">{level}</p>
@@ -531,14 +552,10 @@ const Logs: React.FC = () => {
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: 20 }}
                   transition={{ delay: index * 0.02 }}
-                  className={`p-4 rounded-xl border-l-4 transition-all duration-200 hover:shadow-md ${
-                    logColors[log.level as keyof typeof logColors] || 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20'
-                  }`}
+                  className={`p-4 rounded-xl border-l-4 transition-all duration-200 hover:shadow-md ${getLogColors(log.level)}`}
                 >
                   <div className="flex items-start space-x-3">
-                    <IconComponent className={`w-5 h-5 mt-0.5 flex-shrink-0 ${
-                      logTextColors[log.level as keyof typeof logTextColors] || 'text-gray-600 dark:text-gray-400'
-                    }`} />
+                    <IconComponent className={`w-5 h-5 mt-0.5 flex-shrink-0 ${getLogTextColors(log.level)}`} />
 
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center space-x-3 mb-2">

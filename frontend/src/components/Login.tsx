@@ -30,7 +30,7 @@ const Login: React.FC = () => {
       } else {
         toast.error('Invalid password');
       }
-    } catch (error) {
+    } catch {
       toast.error('Login failed. Please try again.');
     } finally {
       setIsLoading(false);

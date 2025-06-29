@@ -1,8 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
-  Key, Settings, Clock, Zap, Users, Copy, CheckCircle, RefreshCw, 
-  Save, AlertCircle, Sparkles, Code, Shield, Timer 
+  Key, Clock, Zap, Users, Copy, CheckCircle, RefreshCw, 
+  AlertCircle, Sparkles, Code, Shield, Timer 
 } from 'lucide-react';
 import { CreateKeyRequest, APIKey } from '../types';
 import apiService from '../services/api';
@@ -163,12 +163,17 @@ const CreateKey: React.FC = () => {
         customKey: ''
       }));
       setErrors({});
-    } catch (error: any) {
-      if (error.response?.data?.errors) {
-        setErrors(error.response.data.errors);
-        toast.error('Please fix the form errors');
+    } catch (error: unknown) {
+      if (error && typeof error === 'object' && 'response' in error) {
+        const responseError = error as { response?: { data?: { errors?: Record<string, string>; error?: string } } };
+        if (responseError.response?.data?.errors) {
+          setErrors(responseError.response.data.errors);
+          toast.error('Please fix the form errors');
+        } else {
+          toast.error(responseError.response?.data?.error || 'Failed to create API key');
+        }
       } else {
-        toast.error(error.response?.data?.error || 'Failed to create API key');
+        toast.error('Failed to create API key');
       }
     } finally {
       setIsLoading(false);
@@ -185,7 +190,7 @@ const CreateKey: React.FC = () => {
       } else {
         toast.error('Failed to copy to clipboard');
       }
-    } catch (error) {
+    } catch {
       toast.error('Failed to copy to clipboard');
     }
   };
