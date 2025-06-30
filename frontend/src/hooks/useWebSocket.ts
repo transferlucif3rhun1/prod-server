@@ -1,7 +1,6 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef, useCallback, useState, useMemo } from 'react';
 import { useStore } from '../store/useStore';
 import { WSEvent, APIKey, LogEntry } from '../types';
-import toast from 'react-hot-toast';
 
 interface WebSocketMetrics {
   totalConnections: number;
@@ -17,15 +16,65 @@ interface MessagePayload {
   timestamp: string;
 }
 
-export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
+interface UseWebSocketOptions {
+  maxReconnectAttempts?: number;
+  reconnectDelay?: number;
+  heartbeatInterval?: number;
+  maxQueueSize?: number;
+  onMessage?: (event: WSEvent) => void;
+}
+
+const DEFAULT_OPTIONS: Required<UseWebSocketOptions> = {
+  maxReconnectAttempts: 5,
+  reconnectDelay: 1000,
+  heartbeatInterval: 30000,
+  maxQueueSize: 100,
+  onMessage: () => {}
+};
+
+// Custom hook for managing toast notifications to prevent spam
+const useToastManager = () => {
+  const lastToastTimes = useRef<Record<string, number>>({});
+  const MIN_TOAST_INTERVAL = 5000; // 5 seconds minimum between same toast types
+
+  const showToast = useCallback((message: string, type: 'success' | 'error' | 'info', id?: string) => {
+    const toastId = id || `${type}-${message}`;
+    const now = Date.now();
+    const lastTime = lastToastTimes.current[toastId] || 0;
+
+    if (now - lastTime >= MIN_TOAST_INTERVAL) {
+      // Import toast dynamically to avoid circular dependencies
+      import('react-hot-toast').then(({ default: toast }) => {
+        switch (type) {
+          case 'success':
+            toast.success(message, { id: toastId, duration: 3000 });
+            break;
+          case 'error':
+            toast.error(message, { id: toastId, duration: 5000 });
+            break;
+          case 'info':
+            toast(message, { id: toastId, duration: 4000 });
+            break;
+        }
+      });
+      lastToastTimes.current[toastId] = now;
+    }
+  }, []);
+
+  return { showToast };
+};
+
+export const useWebSocket = (options: UseWebSocketOptions = {}) => {
+  const config = useMemo(() => ({ ...DEFAULT_OPTIONS, ...options }), [options]);
+  
   const ws = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const reconnectAttempts = useRef(0);
   const heartbeatInterval = useRef<NodeJS.Timeout>();
   const connectionStartTime = useRef<number>(0);
   const messageQueue = useRef<WSEvent[]>([]);
   const mountedRef = useRef(true);
   const isConnectingRef = useRef(false);
+  const reconnectAttempts = useRef(0);
   
   const [isConnected, setIsConnected] = useState(false);
   const [connectionState, setConnectionState] = useState<'disconnected' | 'connecting' | 'connected' | 'reconnecting'>('disconnected');
@@ -38,11 +87,6 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     connectionUptime: 0
   });
 
-  const maxReconnectAttempts = 5;
-  const baseReconnectDelay = 1000;
-  const heartbeatInterval_ms = 30000;
-  const maxMessageQueueSize = 100;
-
   const { 
     addApiKey, 
     updateApiKey, 
@@ -50,6 +94,8 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     addLog,
     updateConnectionStatus 
   } = useStore();
+
+  const { showToast } = useToastManager();
 
   const updateMetrics = useCallback((updates: Partial<WebSocketMetrics>) => {
     if (!mountedRef.current) return;
@@ -70,21 +116,21 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         case 'key_created':
           if (event.data) {
             addApiKey(event.data as APIKey);
-            toast.success(`New API key created: ${(event.data as APIKey).name || 'Untitled'}`);
+            showToast(`New API key created: ${(event.data as APIKey).name || 'Untitled'}`, 'success');
           }
           break;
 
         case 'key_updated':
           if (event.data) {
             updateApiKey(event.data as APIKey);
-            toast.success(`API key updated: ${(event.data as APIKey).name || 'Untitled'}`);
+            showToast(`API key updated: ${(event.data as APIKey).name || 'Untitled'}`, 'success');
           }
           break;
 
         case 'key_deleted':
           if (event.data && typeof event.data === 'object' && 'id' in event.data) {
             removeApiKey((event.data as { id: string }).id);
-            toast.success('API key deleted');
+            showToast('API key deleted', 'info');
           }
           break;
 
@@ -96,17 +142,18 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
 
         case 'system_update':
           if (event.data && typeof event.data === 'object' && 'message' in event.data) {
-            toast.success((event.data as { message: string }).message);
+            showToast((event.data as { message: string }).message, 'success', 'system-update');
           }
           break;
 
         case 'pong':
+          // Heartbeat response - no action needed
           break;
 
         case 'error':
           if (event.data && typeof event.data === 'object' && 'message' in event.data) {
             const errorMessage = (event.data as { message: string }).message;
-            toast.error(errorMessage);
+            showToast(errorMessage, 'error', 'system-error');
             updateMetrics({ 
               totalErrors: metrics.totalErrors + 1,
               lastError: errorMessage 
@@ -118,9 +165,8 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           console.log('Unknown WebSocket event type:', event.type);
       }
 
-      if (onMessage) {
-        onMessage(event);
-      }
+      // Call external message handler if provided
+      config.onMessage?.(event);
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
       updateMetrics({ 
@@ -128,7 +174,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         lastError: `Message handling error: ${error}` 
       });
     }
-  }, [addApiKey, updateApiKey, removeApiKey, addLog, onMessage, metrics.totalMessages, metrics.totalErrors, updateMetrics]);
+  }, [addApiKey, updateApiKey, removeApiKey, addLog, config.onMessage, metrics.totalMessages, metrics.totalErrors, updateMetrics, showToast]);
 
   const processMessageQueue = useCallback(() => {
     if (ws.current?.readyState === WebSocket.OPEN && messageQueue.current.length > 0) {
@@ -160,8 +206,8 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
           console.error('Failed to send heartbeat:', error);
         }
       }
-    }, heartbeatInterval_ms);
-  }, []);
+    }, config.heartbeatInterval);
+  }, [config.heartbeatInterval]);
 
   const stopHeartbeat = useCallback(() => {
     if (heartbeatInterval.current) {
@@ -184,6 +230,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       const currentWs = ws.current;
       ws.current = null;
       
+      // Remove event listeners to prevent memory leaks
       currentWs.onopen = null;
       currentWs.onmessage = null;
       currentWs.onclose = null;
@@ -232,7 +279,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const wsUrl = `${protocol}//${window.location.host}/api/v1/ws?token=${encodeURIComponent(token)}`;
       
-      console.log('Attempting WebSocket connection to:', wsUrl);
+      console.log('Attempting WebSocket connection');
       
       ws.current = new WebSocket(wsUrl);
       connectionStartTime.current = Date.now();
@@ -261,10 +308,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         startHeartbeat();
         processMessageQueue();
 
-        toast.success('Real-time connection established', { 
-          id: 'ws-connection',
-          duration: 2000 
-        });
+        showToast('Real-time connection established', 'success', 'ws-connection');
       };
 
       ws.current.onmessage = (event) => {
@@ -292,14 +336,15 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         stopHeartbeat();
         updateConnectionStatus({ websocket: false });
         
-        if (event.code !== 1000 && reconnectAttempts.current < maxReconnectAttempts) {
+        // Only attempt reconnection for unexpected closures
+        if (event.code !== 1000 && reconnectAttempts.current < config.maxReconnectAttempts) {
           setConnectionState('reconnecting');
           const delay = Math.min(
-            baseReconnectDelay * Math.pow(2, reconnectAttempts.current),
+            config.reconnectDelay * Math.pow(2, reconnectAttempts.current),
             30000
           );
           
-          console.log(`Attempting reconnection in ${delay}ms (attempt ${reconnectAttempts.current + 1}/${maxReconnectAttempts})`);
+          console.log(`Attempting reconnection in ${delay}ms (attempt ${reconnectAttempts.current + 1}/${config.maxReconnectAttempts})`);
           
           updateMetrics({ totalReconnections: metrics.totalReconnections + 1 });
           
@@ -309,22 +354,16 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
               connect();
             }
           }, delay);
-        } else if (reconnectAttempts.current >= maxReconnectAttempts) {
+        } else if (reconnectAttempts.current >= config.maxReconnectAttempts) {
           console.error('Max WebSocket reconnection attempts reached');
           updateMetrics({ 
             lastError: 'Max reconnection attempts reached' 
           });
-          toast.error('Connection lost. Please refresh the page.', {
-            id: 'ws-connection-lost',
-            duration: 0
-          });
+          showToast('Connection lost. Please refresh the page.', 'error', 'ws-connection-lost');
         }
 
         if (event.code !== 1000) {
-          toast.error('Real-time connection lost', { 
-            id: 'ws-connection',
-            duration: 3000 
-          });
+          showToast('Real-time connection lost', 'error', 'ws-connection');
         }
       };
 
@@ -351,7 +390,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         lastError: `Connection setup error: ${error}` 
       });
     }
-  }, [handleMessage, cleanup, startHeartbeat, processMessageQueue, stopHeartbeat, updateConnectionStatus, metrics.totalConnections, metrics.totalErrors, metrics.totalReconnections, updateMetrics]);
+  }, [handleMessage, cleanup, startHeartbeat, processMessageQueue, stopHeartbeat, updateConnectionStatus, metrics.totalConnections, metrics.totalErrors, metrics.totalReconnections, updateMetrics, showToast, config.maxReconnectAttempts, config.reconnectDelay]);
 
   const disconnect = useCallback(() => {
     console.log('Disconnecting WebSocket');
@@ -375,7 +414,8 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
         return false;
       }
     } else {
-      if (messageQueue.current.length < maxMessageQueueSize) {
+      // Queue message if not connected but don't exceed max queue size
+      if (messageQueue.current.length < config.maxQueueSize) {
         messageQueue.current.push(message as WSEvent);
         console.log('Message queued for sending when connection is available');
       } else {
@@ -383,7 +423,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       }
       return false;
     }
-  }, [metrics.totalErrors, updateMetrics]);
+  }, [metrics.totalErrors, updateMetrics, config.maxQueueSize]);
 
   const forceReconnect = useCallback(() => {
     console.log('Force reconnecting WebSocket');
@@ -401,15 +441,16 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
       isConnected,
       state: connectionState,
       reconnectAttempts: reconnectAttempts.current,
-      maxReconnectAttempts,
+      maxReconnectAttempts: config.maxReconnectAttempts,
       queuedMessages: messageQueue.current.length,
       metrics: {
         ...metrics,
         connectionUptime: connectionStartTime.current ? Date.now() - connectionStartTime.current : 0
       }
     };
-  }, [isConnected, connectionState, metrics]);
+  }, [isConnected, connectionState, metrics, config.maxReconnectAttempts]);
 
+  // Initialize connection when token is available
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (token && !isConnectingRef.current) {
@@ -419,15 +460,16 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     }
   }, [connect]);
 
+  // Handle visibility change and network events
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (!mountedRef.current) return;
       
       if (document.hidden) {
-        console.log('Page hidden - maintaining WebSocket connection but reducing activity');
+        console.log('Page hidden - maintaining connection but reducing activity');
         stopHeartbeat();
       } else {
-        console.log('Page visible - resuming full WebSocket activity');
+        console.log('Page visible - resuming full activity');
         if (isConnected && ws.current?.readyState === WebSocket.OPEN) {
           startHeartbeat();
         } else if (!isConnected && !isConnectingRef.current) {
@@ -442,7 +484,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     const handleOnline = () => {
       if (!mountedRef.current) return;
       
-      console.log('Network online - attempting WebSocket reconnection');
+      console.log('Network online - attempting reconnection');
       if (!isConnected && !isConnectingRef.current) {
         const token = localStorage.getItem('token');
         if (token) {
@@ -453,7 +495,7 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     };
 
     const handleOffline = () => {
-      console.log('Network offline - WebSocket will disconnect');
+      console.log('Network offline');
       setIsConnected(false);
       updateConnectionStatus({ websocket: false });
     };
@@ -496,15 +538,15 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     };
   }, [connect, disconnect, isConnected, startHeartbeat, stopHeartbeat, updateConnectionStatus]);
 
+  // Cleanup on unmount
   useEffect(() => {
     return () => {
       mountedRef.current = false;
-      console.log('Disconnecting WebSocket');
       disconnect();
     };
   }, [disconnect]);
 
-  return { 
+  return useMemo(() => ({ 
     isConnected,
     connectionState,
     sendMessage,
@@ -512,5 +554,5 @@ export const useWebSocket = (onMessage?: (event: WSEvent) => void) => {
     disconnect,
     getConnectionStatus,
     metrics
-  };
+  }), [isConnected, connectionState, sendMessage, forceReconnect, disconnect, getConnectionStatus, metrics]);
 };

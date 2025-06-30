@@ -1,28 +1,24 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Search,
-  MoreVertical,
-  Edit3,
-  Trash2,
-  Copy,
-  CheckCircle,
-  RefreshCw,
-  Download,
-  Calendar,
-  Activity,
-  Users,
-  Zap,
-  Plus,
-  X,
-  Clock,
-  Grid,
-  List
+  Search, MoreVertical, Edit3, Trash2, RefreshCw, Download,
+  Calendar, Activity, Users, Zap, Plus, Grid, List, Filter
 } from 'lucide-react';
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
-import { copyToClipboard } from '../utils';
+import { 
+  LoadingSpinner, 
+  ErrorDisplay, 
+  ActionButton, 
+  StatusBadge, 
+  EmptyState, 
+  CopyButton,
+  Modal,
+  FormInput,
+  formatValue,
+  formatUsageDisplay
+} from './shared';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 
@@ -34,174 +30,392 @@ interface EditFormData {
   isActive: boolean;
 }
 
-const LoadingSpinner = ({ message = 'Loading...' }: { message?: string }) => (
-  <div className="flex flex-col items-center justify-center h-64 space-y-4">
-    <div className="w-12 h-12 border-4 border-blue-200 border-t-blue-600 rounded-full animate-spin"></div>
-    <p className="text-gray-600 dark:text-gray-400">{message}</p>
+type ViewMode = 'table' | 'cards';
+type KeyStatus = 'active' | 'expired' | 'inactive';
+
+// Filter and search component
+const FilterControls: React.FC<{
+  searchTerm: string;
+  filterStatus: string;
+  onSearchChange: (value: string) => void;
+  onFilterChange: (value: string) => void;
+  viewMode: ViewMode;
+  onViewModeChange: (mode: ViewMode) => void;
+  totalCounts: { total: number; active: number; expired: number; inactive: number };
+}> = ({ 
+  searchTerm, 
+  filterStatus, 
+  onSearchChange, 
+  onFilterChange, 
+  viewMode, 
+  onViewModeChange,
+  totalCounts 
+}) => (
+  <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
+    <div className="flex-1 flex flex-col sm:flex-row items-stretch sm:items-center space-y-3 sm:space-y-0 sm:space-x-4">
+      <div className="relative flex-1 max-w-md">
+        <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
+        <input
+          type="text"
+          placeholder="Search by name, key, or masked key..."
+          value={searchTerm}
+          onChange={(e) => onSearchChange(e.target.value)}
+          className="w-full pl-10 pr-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 focus:ring-0 transition-colors text-sm"
+        />
+      </div>
+
+      <select
+        value={filterStatus}
+        onChange={(e) => onFilterChange(e.target.value)}
+        className="px-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 transition-colors text-sm min-w-[140px]"
+      >
+        <option value="all">All Keys ({totalCounts.total})</option>
+        <option value="active">Active ({totalCounts.active})</option>
+        <option value="expired">Expired ({totalCounts.expired})</option>
+        <option value="inactive">Inactive ({totalCounts.inactive})</option>
+      </select>
+    </div>
+
+    <div className="flex items-center bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
+      <button
+        onClick={() => onViewModeChange('table')}
+        className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+          viewMode === 'table'
+            ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
+            : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+        }`}
+      >
+        <List className="w-4 h-4" />
+      </button>
+      <button
+        onClick={() => onViewModeChange('cards')}
+        className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+          viewMode === 'cards'
+            ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
+            : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
+        }`}
+      >
+        <Grid className="w-4 h-4" />
+      </button>
+    </div>
   </div>
 );
 
-const ErrorDisplay = ({ 
-  title, 
-  message, 
-  onRetry, 
-  retryLabel = 'Try Again',
-  showOfflineIndicator = false 
-}: {
-  title: string;
-  message: string;
-  onRetry?: () => void;
-  retryLabel?: string;
-  showOfflineIndicator?: boolean;
-}) => (
-  <div className="flex flex-col items-center justify-center h-64 space-y-4">
-    <div className="p-4 bg-red-100 dark:bg-red-900/20 rounded-lg text-center max-w-md">
-      <p className="text-red-800 dark:text-red-400 font-medium">{title}</p>
-      <p className="text-red-600 dark:text-red-500 text-sm mt-1">{message}</p>
-      {showOfflineIndicator && (
-        <div className="flex items-center justify-center mt-2 text-sm text-gray-600 dark:text-gray-400">
-          <span>You appear to be offline</span>
+// Action menu component
+const ActionMenu: React.FC<{
+  keyId: string;
+  keyName?: string;
+  onEdit: () => void;
+  onDelete: () => void;
+  onCopy: () => void;
+  isOpen: boolean;
+  onClose: () => void;
+}> = ({ keyId, keyName, onEdit, onDelete, onCopy, isOpen, onClose }) => {
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest(`[data-menu="${keyId}"]`)) {
+        onClose();
+      }
+    };
+
+    if (isOpen) {
+      document.addEventListener('click', handleClickOutside);
+    }
+
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [isOpen, keyId, onClose]);
+
+  if (!isOpen) return null;
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.95 }}
+      className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10 min-w-[150px]"
+      data-menu={keyId}
+    >
+      <button
+        onClick={onCopy}
+        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 rounded-t-lg"
+      >
+        <span>Copy Key</span>
+      </button>
+      <button
+        onClick={onEdit}
+        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
+      >
+        <Edit3 className="w-4 h-4" />
+        <span>Edit</span>
+      </button>
+      <button
+        onClick={onDelete}
+        className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center space-x-2 rounded-b-lg"
+      >
+        <Trash2 className="w-4 h-4" />
+        <span>Delete</span>
+      </button>
+    </motion.div>
+  );
+};
+
+// Key card component
+const KeyCard: React.FC<{
+  apiKey: APIKey;
+  isSelected: boolean;
+  onSelect: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onCopy: () => void;
+  getKeyStatus: (key: APIKey) => KeyStatus;
+}> = ({ apiKey, isSelected, onSelect, onEdit, onDelete, onCopy, getKeyStatus }) => {
+  const [showActionMenu, setShowActionMenu] = useState(false);
+  const [copyState, setCopyState] = useState(false);
+  
+  const usageDisplay = useMemo(() => 
+    formatUsageDisplay(Number(apiKey.usageCount), Number(apiKey.totalRequests)), 
+    [apiKey.usageCount, apiKey.totalRequests]
+  );
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(apiKey.id);
+      setCopyState(true);
+      onCopy();
+      setTimeout(() => setCopyState(false), 2000);
+    } catch {
+      toast.error('Failed to copy to clipboard');
+    }
+  }, [apiKey.id, onCopy]);
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-md transition-all duration-200"
+    >
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-3">
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={onSelect}
+            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          <div>
+            <h3 className="font-medium text-gray-900 dark:text-white">
+              {apiKey.name || 'Untitled Key'}
+            </h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400">
+              {apiKey.maskedKey}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center space-x-2">
+          <StatusBadge status={getKeyStatus(apiKey)}>
+            {getKeyStatus(apiKey)}
+          </StatusBadge>
+          <div className="relative">
+            <button
+              onClick={() => setShowActionMenu(!showActionMenu)}
+              className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+            >
+              <MoreVertical className="w-4 h-4" />
+            </button>
+            <ActionMenu
+              keyId={apiKey.id}
+              keyName={apiKey.name}
+              onEdit={onEdit}
+              onDelete={onDelete}
+              onCopy={handleCopy}
+              isOpen={showActionMenu}
+              onClose={() => setShowActionMenu(false)}
+            />
+          </div>
+        </div>
+      </div>
+      
+      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+        <div className="flex items-center space-x-2">
+          <Zap className="w-4 h-4 text-yellow-500" />
+          <span className="text-gray-600 dark:text-gray-400">RPM:</span>
+          <span className="font-medium">{formatValue(apiKey.rpm)}</span>
+        </div>
+        <div className="flex items-center space-x-2">
+          <Users className="w-4 h-4 text-blue-500" />
+          <span className="text-gray-600 dark:text-gray-400">Threads:</span>
+          <span className="font-medium">{formatValue(apiKey.threadsLimit)}</span>
+        </div>
+        <div className="flex items-center space-x-2">
+          <Activity className="w-4 h-4 text-green-500" />
+          <span className="text-gray-600 dark:text-gray-400">Usage:</span>
+          <span className="font-medium" title={usageDisplay.subtext}>
+            {usageDisplay.text}
+          </span>
+        </div>
+        <div className="flex items-center space-x-2">
+          <Calendar className="w-4 h-4 text-purple-500" />
+          <span className="text-gray-600 dark:text-gray-400">Expires:</span>
+          <span className="font-medium">{format(new Date(apiKey.expiration), 'MMM dd, yyyy')}</span>
+        </div>
+      </div>
+      
+      {!usageDisplay.isUnlimited && usageDisplay.percentage !== null && (
+        <div className="mt-3">
+          <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+            <div 
+              className="bg-blue-600 h-2 rounded-full transition-all duration-300"
+              style={{ width: `${usageDisplay.percentage}%` }}
+            />
+          </div>
+          <div className="flex items-center justify-between mt-1 text-xs text-gray-500 dark:text-gray-400">
+            <span>Usage: {usageDisplay.subtext}</span>
+          </div>
         </div>
       )}
-    </div>
-    {onRetry && (
-      <motion.button
-        whileHover={{ scale: 1.05 }}
-        whileTap={{ scale: 0.95 }}
-        onClick={onRetry}
-        className="px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center space-x-2"
-      >
-        <RefreshCw className="w-4 h-4" />
-        <span>{retryLabel}</span>
-      </motion.button>
-    )}
-  </div>
-);
-
-const StatusBadge = ({ status, children }: { status: 'active' | 'expired' | 'inactive'; children: React.ReactNode }) => {
-  const statusClasses = {
-    active: 'bg-green-100 text-green-800 dark:bg-green-900/20 dark:text-green-400',
-    expired: 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/20 dark:text-yellow-400',
-    inactive: 'bg-red-100 text-red-800 dark:bg-red-900/20 dark:text-red-400'
-  };
-
-  return (
-    <span className={`px-2 py-1 rounded-full text-xs font-medium ${statusClasses[status]}`}>
-      {children}
-    </span>
+    </motion.div>
   );
 };
 
-const ActionButton = ({ 
-  onClick, 
-  children, 
-  variant = 'primary', 
-  size = 'md', 
-  disabled = false, 
-  loading = false,
-  icon: Icon 
-}: {
-  onClick: () => void;
-  children: React.ReactNode;
-  variant?: 'primary' | 'secondary' | 'danger' | 'success';
-  size?: 'sm' | 'md' | 'lg';
-  disabled?: boolean;
-  loading?: boolean;
-  icon?: React.ElementType;
-}) => {
-  const baseClasses = 'font-medium rounded-lg transition-all duration-200 flex items-center justify-center space-x-2 disabled:cursor-not-allowed';
-  
-  const variantClasses = {
-    primary: 'bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white',
-    secondary: 'bg-gray-600 hover:bg-gray-700 disabled:bg-gray-400 text-white',
-    danger: 'bg-red-600 hover:bg-red-700 disabled:bg-red-400 text-white',
-    success: 'bg-green-600 hover:bg-green-700 disabled:bg-green-400 text-white'
-  };
+// Edit modal component
+const EditModal: React.FC<{
+  isOpen: boolean;
+  onClose: () => void;
+  apiKey: APIKey | null;
+  onSave: (data: UpdateKeyRequest) => Promise<void>;
+}> = ({ isOpen, onClose, apiKey, onSave }) => {
+  const [formData, setFormData] = useState<EditFormData>({
+    name: '',
+    rpm: 0,
+    threadsLimit: 0,
+    totalRequests: 0,
+    isActive: true
+  });
+  const [isLoading, setIsLoading] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const sizeClasses = {
-    sm: 'px-3 py-2 text-sm',
-    md: 'px-4 py-2',
-    lg: 'px-6 py-3 text-lg'
-  };
+  useEffect(() => {
+    if (apiKey) {
+      setFormData({
+        name: apiKey.name || '',
+        rpm: apiKey.rpm,
+        threadsLimit: apiKey.threadsLimit,
+        totalRequests: apiKey.totalRequests,
+        isActive: apiKey.isActive
+      });
+    }
+  }, [apiKey]);
+
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!apiKey) return;
+
+    setIsLoading(true);
+    try {
+      const updateData: UpdateKeyRequest = {};
+      
+      // Only include changed values
+      if (formData.name !== apiKey.name) updateData.name = formData.name;
+      if (formData.rpm !== apiKey.rpm) updateData.rpm = formData.rpm;
+      if (formData.threadsLimit !== apiKey.threadsLimit) updateData.threadsLimit = formData.threadsLimit;
+      if (formData.totalRequests !== apiKey.totalRequests) updateData.totalRequests = formData.totalRequests;
+      if (formData.isActive !== apiKey.isActive) updateData.isActive = formData.isActive;
+
+      if (Object.keys(updateData).length === 0) {
+        toast.info('No changes detected');
+        onClose();
+        return;
+      }
+
+      await onSave(updateData);
+      onClose();
+    } catch (error) {
+      console.error('Failed to update key:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [apiKey, formData, onSave, onClose]);
 
   return (
-    <motion.button
-      whileHover={{ scale: disabled ? 1 : 1.05 }}
-      whileTap={{ scale: disabled ? 1 : 0.95 }}
-      onClick={onClick}
-      disabled={disabled || loading}
-      className={`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]}`}
-    >
-      {loading ? (
-        <RefreshCw className="w-4 h-4 animate-spin" />
-      ) : (
-        Icon && <Icon className="w-4 h-4" />
-      )}
-      <span>{children}</span>
-    </motion.button>
+    <Modal isOpen={isOpen} onClose={onClose} title="Edit API Key">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <FormInput
+          label="Name"
+          value={formData.name}
+          onChange={(value) => setFormData(prev => ({ ...prev, name: value as string }))}
+          placeholder="API Key Name"
+          error={errors.name}
+        />
+
+        <div className="grid grid-cols-2 gap-4">
+          <FormInput
+            label="RPM (0 = Unlimited)"
+            value={formData.rpm}
+            onChange={(value) => setFormData(prev => ({ ...prev, rpm: value as number }))}
+            type="number"
+            min={0}
+            max={10000}
+            error={errors.rpm}
+          />
+
+          <FormInput
+            label="Threads (0 = Unlimited)"
+            value={formData.threadsLimit}
+            onChange={(value) => setFormData(prev => ({ ...prev, threadsLimit: value as number }))}
+            type="number"
+            min={0}
+            max={1000}
+            error={errors.threadsLimit}
+          />
+        </div>
+
+        <FormInput
+          label="Total Requests (0 = Unlimited)"
+          value={formData.totalRequests}
+          onChange={(value) => setFormData(prev => ({ ...prev, totalRequests: value as number }))}
+          type="number"
+          min={0}
+          error={errors.totalRequests}
+        />
+
+        <div className="flex items-center space-x-2">
+          <input
+            type="checkbox"
+            id="isActive"
+            checked={formData.isActive}
+            onChange={(e) => setFormData(prev => ({ ...prev, isActive: e.target.checked }))}
+            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+          />
+          <label htmlFor="isActive" className="text-sm font-medium text-gray-700 dark:text-gray-300">
+            Active
+          </label>
+        </div>
+
+        <div className="flex space-x-3 pt-4">
+          <ActionButton
+            onClick={onClose}
+            variant="secondary"
+            size="md"
+          >
+            Cancel
+          </ActionButton>
+          <ActionButton
+            onClick={() => {}}
+            type="submit"
+            loading={isLoading}
+            variant="primary"
+            size="md"
+          >
+            Update Key
+          </ActionButton>
+        </div>
+      </form>
+    </Modal>
   );
 };
 
-const EmptyState = ({ 
-  title, 
-  description, 
-  actionLabel, 
-  onAction, 
-  icon: Icon 
-}: {
-  title: string;
-  description: string;
-  actionLabel?: string;
-  onAction?: () => void;
-  icon?: React.ElementType;
-}) => (
-  <div className="text-center py-12">
-    <div className="space-y-4">
-      {Icon && <Icon className="w-12 h-12 text-gray-400 mx-auto mb-4" />}
-      <div className="text-gray-500 dark:text-gray-400">
-        <p className="text-lg font-medium mb-2">{title}</p>
-        <p className="text-sm">{description}</p>
-      </div>
-      {actionLabel && onAction && (
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={onAction}
-          className="mt-4 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors inline-flex items-center space-x-2"
-        >
-          <span>{actionLabel}</span>
-        </motion.button>
-      )}
-    </div>
-  </div>
-);
-
-const formatValue = (value: number): string => {
-  if (value === 0) {
-    return 'Unlimited';
-  }
-  return value.toLocaleString();
-};
-
-const formatUsageDisplay = (used: number, total: number) => {
-  if (total === 0) {
-    return {
-      text: `${used.toLocaleString()} used`,
-      subtext: 'Unlimited available',
-      percentage: null,
-      isUnlimited: true
-    };
-  }
-  
-  const percentage = Math.min((used / total) * 100, 100);
-  return {
-    text: `${used.toLocaleString()}/${total.toLocaleString()}`,
-    subtext: `${percentage.toFixed(1)}% used`,
-    percentage: percentage,
-    isUnlimited: false
-  };
-};
-
+// Main component
 const ManageKeys: React.FC = () => {
   const { 
     apiKeys, 
@@ -213,32 +427,22 @@ const ManageKeys: React.FC = () => {
     updateApiKey, 
     removeApiKey,
     setKeysLoading,
-    setKeysError
+    setKeysError,
+    clearSelectedKeys
   } = useStore();
 
   const [filteredKeys, setFilteredKeys] = useState<APIKey[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [editingKey, setEditingKey] = useState<APIKey | null>(null);
-  const [showEditModal, setShowEditModal] = useState(false);
-  const [editForm, setEditForm] = useState<EditFormData>({
-    name: '',
-    rpm: 0,
-    threadsLimit: 0,
-    totalRequests: 0,
-    isActive: true
-  });
-  const [editLoading, setEditLoading] = useState(false);
-  const [actionMenuKey, setActionMenuKey] = useState<string | null>(null);
+  const [viewMode, setViewMode] = useState<ViewMode>('cards');
   const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage] = useState(10);
-  const [copyStates, setCopyStates] = useState<Record<string, boolean>>({});
-  const [viewMode, setViewMode] = useState<'table' | 'cards'>('table');
   const [retryAttempts, setRetryAttempts] = useState(0);
-  const [offlineMode, setOfflineMode] = useState(false);
   const [lastFetchTime, setLastFetchTime] = useState<number>(0);
 
-  const getKeyStatus = useCallback((key: APIKey): 'active' | 'expired' | 'inactive' => {
+  const itemsPerPage = 10;
+
+  const getKeyStatus = useCallback((key: APIKey): KeyStatus => {
     const now = new Date();
     const expirationDate = new Date(key.expiration);
     
@@ -247,54 +451,23 @@ const ManageKeys: React.FC = () => {
     return 'active';
   }, []);
 
-  useEffect(() => {
-    fetchKeys();
-  }, []);
-
-  useEffect(() => {
-    filterKeys();
-  }, [apiKeys, searchTerm, filterStatus, getKeyStatus]);
-
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as HTMLElement;
-      if (!target.closest('.action-menu-container')) {
-        setActionMenuKey(null);
-      }
+  const totalCounts = useMemo(() => {
+    const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
+    const now = new Date();
+    
+    return {
+      total: safeApiKeys.length,
+      active: safeApiKeys.filter(key => key.isActive && new Date(key.expiration) > now).length,
+      expired: safeApiKeys.filter(key => new Date(key.expiration) <= now).length,
+      inactive: safeApiKeys.filter(key => !key.isActive).length
     };
-    document.addEventListener('click', handleClickOutside);
-    return () => document.removeEventListener('click', handleClickOutside);
-  }, []);
-
-  useEffect(() => {
-    const handleOnline = () => {
-      setOfflineMode(false);
-      if (retryAttempts > 0) {
-        fetchKeys(false);
-      }
-    };
-
-    const handleOffline = () => {
-      setOfflineMode(true);
-    };
-
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-    };
-  }, [retryAttempts]);
+  }, [apiKeys]);
 
   const fetchKeys = useCallback(async (useCache = true) => {
     const now = Date.now();
     const timeSinceLastFetch = now - lastFetchTime;
     
-    if (timeSinceLastFetch < 1000) {
-      console.log('Skipping fetch - too soon since last request');
-      return;
-    }
+    if (timeSinceLastFetch < 1000) return;
 
     try {
       setKeysLoading(true);
@@ -306,10 +479,6 @@ const ManageKeys: React.FC = () => {
       const keysData = response.data || [];
       
       setApiKeys(keysData);
-      
-      if (keysData.length === 0 && !useCache) {
-        console.log('No API keys found');
-      }
     } catch (error: unknown) {
       console.error('Failed to fetch keys:', error);
       
@@ -319,17 +488,15 @@ const ManageKeys: React.FC = () => {
       if (retryAttempts < 3 && timeSinceLastFetch > 5000) {
         setRetryAttempts(prev => prev + 1);
         const retryDelay = Math.min(1000 * (retryAttempts + 1), 5000);
-        console.log(`Retrying in ${retryDelay}ms...`);
         setTimeout(() => fetchKeys(false), retryDelay);
-      } else {
-        console.error('Max retries reached or too frequent requests');
       }
     } finally {
       setKeysLoading(false);
     }
   }, [setApiKeys, setKeysLoading, setKeysError, retryAttempts, lastFetchTime]);
 
-  const filterKeys = useCallback(() => {
+  // Filter keys based on search and status
+  useEffect(() => {
     const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
     let filtered = [...safeApiKeys];
     
@@ -350,78 +517,17 @@ const ManageKeys: React.FC = () => {
     setCurrentPage(1);
   }, [apiKeys, searchTerm, filterStatus, getKeyStatus]);
 
-  const handleCopyToClipboard = useCallback(async (text: string, keyId: string) => {
-    try {
-      const success = await copyToClipboard(text);
-      if (success) {
-        setCopyStates(prev => ({ ...prev, [keyId]: true }));
-        toast.success('API key copied to clipboard!');
-        setTimeout(() => {
-          setCopyStates(prev => ({ ...prev, [keyId]: false }));
-        }, 2000);
-      } else {
-        toast.error('Failed to copy to clipboard. Please try selecting and copying manually.');
-      }
-    } catch {
-      toast.error('Failed to copy to clipboard. Please try selecting and copying manually.');
-    }
+  useEffect(() => {
+    fetchKeys();
   }, []);
 
-  const handleEdit = useCallback((key: APIKey) => {
-    setEditingKey(key);
-    setEditForm({
-      name: key.name || '',
-      rpm: key.rpm,
-      threadsLimit: key.threadsLimit,
-      totalRequests: key.totalRequests,
-      isActive: key.isActive
-    });
-    setShowEditModal(true);
-    setActionMenuKey(null);
-  }, []);
-
-  const handleEditSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleEdit = useCallback(async (updateData: UpdateKeyRequest) => {
     if (!editingKey) return;
 
-    setEditLoading(true);
-    try {
-      const updateData: UpdateKeyRequest = Object.entries(editForm).reduce((acc, [key, value]) => {
-        if (value !== editingKey[key as keyof APIKey]) {
-          (acc as Record<string, unknown>)[key] = value;
-        }
-        return acc;
-      }, {} as UpdateKeyRequest);
-
-      if (Object.keys(updateData).length === 0) {
-        toast.info('No changes detected');
-        setShowEditModal(false);
-        return;
-      }
-
-      const response = await apiService.updateKey(editingKey.id, updateData);
-      updateApiKey(response.data);
-      toast.success('API key updated successfully');
-      setShowEditModal(false);
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to update API key';
-      toast.error(errorMessage);
-    } finally {
-      setEditLoading(false);
-    }
-  };
-
-  const handleEditCancel = () => {
-    setShowEditModal(false);
-    setEditingKey(null);
-    setEditForm({
-      name: '',
-      rpm: 0,
-      threadsLimit: 0,
-      totalRequests: 0,
-      isActive: true
-    });
-  };
+    const response = await apiService.updateKey(editingKey.id, updateData);
+    updateApiKey(response.data);
+    toast.success('API key updated successfully');
+  }, [editingKey, updateApiKey]);
 
   const handleDelete = useCallback(async (keyId: string, keyName?: string) => {
     const displayName = keyName || 'this API key';
@@ -434,23 +540,12 @@ const ManageKeys: React.FC = () => {
       removeApiKey(keyId);
       toast.success(`API key "${displayName}" deleted successfully`);
     } catch (error: unknown) {
-      let errorMessage = 'Failed to delete API key. Please try again.';
-      
-      if (error instanceof Error) {
-        if (error.message?.includes('500')) {
-          errorMessage = 'Server error occurred. Please try again in a moment.';
-        } else if (error.message?.includes('404')) {
-          errorMessage = 'API key not found. It may have already been deleted.';
-          fetchKeys(false);
-        }
-      }
-      
+      const errorMessage = error instanceof Error ? error.message : 'Failed to delete API key';
       toast.error(errorMessage);
     }
-    setActionMenuKey(null);
-  }, [removeApiKey, fetchKeys]);
+  }, [removeApiKey]);
 
-  const handleBulkDelete = async () => {
+  const handleBulkDelete = useCallback(async () => {
     if (selectedKeys.size === 0) return;
     
     const keyCount = selectedKeys.size;
@@ -474,7 +569,7 @@ const ManageKeys: React.FC = () => {
         })
       );
 
-      setSelectedKeys(new Set());
+      clearSelectedKeys();
 
       if (successKeys.length > 0) {
         toast.success(`Successfully deleted ${successKeys.length} API key(s)`);
@@ -485,30 +580,9 @@ const ManageKeys: React.FC = () => {
     } catch {
       toast.error('Bulk delete operation failed. Please try again.');
     }
-  };
+  }, [selectedKeys, removeApiKey, clearSelectedKeys]);
 
-  const handleCleanExpired = async () => {
-    const expiredCount = getExpiredKeysCount();
-    if (expiredCount === 0) {
-      toast.info('No expired keys found to clean up.');
-      return;
-    }
-
-    if (!confirm(`This will permanently delete ${expiredCount} expired API key(s). Continue?`)) {
-      return;
-    }
-
-    try {
-      const response = await apiService.cleanExpiredKeys();
-      toast.success(response.message || 'Expired keys cleaned successfully');
-      fetchKeys(false);
-    } catch (error: unknown) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to clean expired keys. Please try again.';
-      toast.error(errorMessage);
-    }
-  };
-
-  const exportKeys = () => {
+  const exportKeys = useCallback(() => {
     if (filteredKeys.length === 0) {
       toast.error('No API keys to export');
       return;
@@ -537,7 +611,7 @@ const ManageKeys: React.FC = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     toast.success(`Exported ${filteredKeys.length} API keys`);
-  };
+  }, [filteredKeys, getKeyStatus]);
 
   const toggleKeySelection = useCallback((keyId: string) => {
     const newSelected = new Set(selectedKeys);
@@ -550,28 +624,16 @@ const ManageKeys: React.FC = () => {
   }, [selectedKeys, setSelectedKeys]);
 
   const selectAll = useCallback(() => {
+    const paginatedKeys = filteredKeys.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
     if (selectedKeys.size === paginatedKeys.length && paginatedKeys.length > 0) {
-      setSelectedKeys(new Set());
+      clearSelectedKeys();
     } else {
       setSelectedKeys(new Set(paginatedKeys.map(key => key.id)));
     }
-  }, [selectedKeys, setSelectedKeys]);
-
-  const getActiveKeysCount = () => {
-    const now = new Date();
-    const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
-    return safeApiKeys.filter(key => key.isActive && new Date(key.expiration) > now).length;
-  };
-
-  const getExpiredKeysCount = () => {
-    const now = new Date();
-    const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
-    return safeApiKeys.filter(key => new Date(key.expiration) <= now).length;
-  };
+  }, [filteredKeys, currentPage, selectedKeys.size, clearSelectedKeys, setSelectedKeys]);
 
   const totalPages = Math.ceil(filteredKeys.length / itemsPerPage);
-  const startIndex = (currentPage - 1) * itemsPerPage;
-  const paginatedKeys = filteredKeys.slice(startIndex, startIndex + itemsPerPage);
+  const paginatedKeys = filteredKeys.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
 
   if (keysLoading && (!apiKeys || apiKeys.length === 0)) {
     return <LoadingSpinner message="Loading your API keys..." />;
@@ -582,7 +644,6 @@ const ManageKeys: React.FC = () => {
       <ErrorDisplay
         title="Unable to Load API Keys"
         message={keysError}
-        showOfflineIndicator={offlineMode}
         onRetry={() => fetchKeys(false)}
         retryLabel="Try Again"
       />
@@ -591,194 +652,38 @@ const ManageKeys: React.FC = () => {
 
   return (
     <div className="space-y-6">
-      <AnimatePresence>
-        {showEditModal && editingKey && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4"
-            onClick={handleEditCancel}
-          >
-            <motion.div
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl max-w-md w-full p-6"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between mb-6">
-                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                  Edit API Key
-                </h3>
-                <button
-                  onClick={handleEditCancel}
-                  className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
+      <FilterControls
+        searchTerm={searchTerm}
+        filterStatus={filterStatus}
+        onSearchChange={setSearchTerm}
+        onFilterChange={setFilterStatus}
+        viewMode={viewMode}
+        onViewModeChange={setViewMode}
+        totalCounts={totalCounts}
+      />
 
-              <form onSubmit={handleEditSubmit} className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Name
-                  </label>
-                  <input
-                    type="text"
-                    value={editForm.name}
-                    onChange={(e) => setEditForm(prev => ({ ...prev, name: e.target.value }))}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                    placeholder="API Key Name"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      RPM (0 = Unlimited)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="10000"
-                      value={editForm.rpm}
-                      onChange={(e) => setEditForm(prev => ({ ...prev, rpm: parseInt(e.target.value) || 0 }))}
-                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                      Threads (0 = Unlimited)
-                    </label>
-                    <input
-                      type="number"
-                      min="0"
-                      max="1000"
-                      value={editForm.threadsLimit}
-                      onChange={(e) => setEditForm(prev => ({ ...prev, threadsLimit: parseInt(e.target.value) || 0 }))}
-                      className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    Total Requests (0 = Unlimited)
-                  </label>
-                  <input
-                    type="number"
-                    min="0"
-                    value={editForm.totalRequests}
-                    onChange={(e) => setEditForm(prev => ({ ...prev, totalRequests: parseInt(e.target.value) || 0 }))}
-                    className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                  />
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="checkbox"
-                    id="isActive"
-                    checked={editForm.isActive}
-                    onChange={(e) => setEditForm(prev => ({ ...prev, isActive: e.target.checked }))}
-                    className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                  />
-                  <label htmlFor="isActive" className="text-sm font-medium text-gray-700 dark:text-gray-300">
-                    Active
-                  </label>
-                </div>
-
-                <div className="flex space-x-3 pt-4">
-                  <button
-                    type="button"
-                    onClick={handleEditCancel}
-                    className="flex-1 px-4 py-2 text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-lg transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={editLoading}
-                    className="flex-1 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white rounded-lg transition-colors flex items-center justify-center"
-                  >
-                    {editLoading ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 mr-2 animate-spin" />
-                        Updating...
-                      </>
-                    ) : (
-                      'Update Key'
-                    )}
-                  </button>
-                </div>
-              </form>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
-        <div className="flex-1 flex flex-col sm:flex-row items-stretch sm:items-center space-y-3 sm:space-y-0 sm:space-x-4">
-          <div className="relative flex-1 max-w-md">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400 w-4 h-4" />
-            <input
-              type="text"
-              placeholder="Search by name, key, or masked key..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 focus:ring-0 transition-colors text-sm"
-            />
-          </div>
-
-          <select
-            value={filterStatus}
-            onChange={(e) => setFilterStatus(e.target.value)}
-            className="px-4 py-3 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-white dark:bg-gray-800 focus:border-blue-500 transition-colors text-sm min-w-[140px]"
-          >
-            <option value="all">All Keys ({(Array.isArray(apiKeys) ? apiKeys : []).length})</option>
-            <option value="active">Active ({getActiveKeysCount()})</option>
-            <option value="expired">Expired ({getExpiredKeysCount()})</option>
-            <option value="inactive">Inactive ({(Array.isArray(apiKeys) ? apiKeys : []).filter(k => !k.isActive).length})</option>
-          </select>
+      <div className="flex items-center justify-between">
+        <div className="text-sm text-gray-600 dark:text-gray-400">
+          Showing {filteredKeys.length.toLocaleString()} of {Array.isArray(apiKeys) ? apiKeys.length.toLocaleString() : '0'} API keys
         </div>
 
         <div className="flex items-center space-x-3 flex-wrap gap-2">
-          <div className="flex items-center bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-            <button
-              onClick={() => setViewMode('table')}
-              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                viewMode === 'table'
-                  ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
-                  : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
-              }`}
-            >
-              <List className="w-4 h-4" />
-            </button>
-            <button
-              onClick={() => setViewMode('cards')}
-              className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-                viewMode === 'cards'
-                  ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
-                  : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
-              }`}
-            >
-              <Grid className="w-4 h-4" />
-            </button>
-          </div>
-
           <AnimatePresence>
             {selectedKeys.size > 0 && (
-              <motion.button
+              <motion.div
                 initial={{ opacity: 0, scale: 0.9 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.9 }}
-                onClick={handleBulkDelete}
-                className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors text-sm flex items-center space-x-2"
               >
-                <Trash2 className="w-4 h-4" />
-                <span>Delete ({selectedKeys.size})</span>
-              </motion.button>
+                <ActionButton
+                  onClick={handleBulkDelete}
+                  variant="danger"
+                  size="sm"
+                  icon={Trash2}
+                >
+                  Delete ({selectedKeys.size})
+                </ActionButton>
+              </motion.div>
             )}
           </AnimatePresence>
 
@@ -793,22 +698,11 @@ const ManageKeys: React.FC = () => {
           </ActionButton>
 
           <ActionButton
-            onClick={handleCleanExpired}
-            disabled={getExpiredKeysCount() === 0}
-            variant="secondary"
-            size="sm"
-            icon={RefreshCw}
-          >
-            Clean Expired
-          </ActionButton>
-
-          <ActionButton
             onClick={() => fetchKeys(false)}
-            disabled={keysLoading}
+            loading={keysLoading}
             variant="primary"
             size="sm"
             icon={RefreshCw}
-            loading={keysLoading}
           >
             Refresh
           </ActionButton>
@@ -819,112 +713,18 @@ const ManageKeys: React.FC = () => {
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
           <div className="p-6">
             <div className="grid gap-4">
-              {paginatedKeys.map((key) => {
-                const usageDisplay = formatUsageDisplay(Number(key.usageCount), Number(key.totalRequests));
-                
-                return (
-                <motion.div
+              {paginatedKeys.map((key) => (
+                <KeyCard
                   key={key.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-md transition-shadow"
-                >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center space-x-3">
-                      <input
-                        type="checkbox"
-                        checked={selectedKeys.has(key.id)}
-                        onChange={() => toggleKeySelection(key.id)}
-                        className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                      />
-                      <div>
-                        <h3 className="font-medium text-gray-900 dark:text-white">
-                          {key.name || 'Untitled Key'}
-                        </h3>
-                        <p className="text-sm text-gray-500 dark:text-gray-400">
-                          {key.maskedKey}
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <StatusBadge status={getKeyStatus(key) as 'active' | 'expired' | 'inactive'}>
-                        {getKeyStatus(key)}
-                      </StatusBadge>
-                      <div className="action-menu-container relative">
-                        <button
-                          onClick={() => setActionMenuKey(actionMenuKey === key.id ? null : key.id)}
-                          className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
-                        >
-                          <MoreVertical className="w-4 h-4" />
-                        </button>
-                        {actionMenuKey === key.id && (
-                          <div className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10 min-w-[150px]">
-                            <button
-                              onClick={() => handleCopyToClipboard(key.id, key.id)}
-                              className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
-                            >
-                              {copyStates[key.id] ? <CheckCircle className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                              <span>Copy Key</span>
-                            </button>
-                            <button
-                              onClick={() => handleEdit(key)}
-                              className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
-                            >
-                              <Edit3 className="w-4 h-4" />
-                              <span>Edit</span>
-                            </button>
-                            <button
-                              onClick={() => handleDelete(key.id, key.name)}
-                              className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center space-x-2"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                              <span>Delete</span>
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                    <div className="flex items-center space-x-2">
-                      <Zap className="w-4 h-4 text-yellow-500" />
-                      <span className="text-gray-600 dark:text-gray-400">RPM:</span>
-                      <span className="font-medium">{formatValue(key.rpm)}</span>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <Users className="w-4 h-4 text-blue-500" />
-                      <span className="text-gray-600 dark:text-gray-400">Threads:</span>
-                      <span className="font-medium">{formatValue(key.threadsLimit)}</span>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <Activity className="w-4 h-4 text-green-500" />
-                      <span className="text-gray-600 dark:text-gray-400">Usage:</span>
-                      <span className="font-medium" title={usageDisplay.subtext}>
-                        {usageDisplay.text}
-                      </span>
-                    </div>
-                    <div className="flex items-center space-x-2">
-                      <Calendar className="w-4 h-4 text-purple-500" />
-                      <span className="text-gray-600 dark:text-gray-400">Expires:</span>
-                      <span className="font-medium">{format(new Date(key.expiration), 'MMM dd, yyyy')}</span>
-                    </div>
-                  </div>
-                  {!usageDisplay.isUnlimited && usageDisplay.percentage !== null && (
-                    <div className="mt-3">
-                      <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-                        <div 
-                          className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-                          style={{ width: `${usageDisplay.percentage}%` }}
-                        />
-                      </div>
-                      <div className="flex items-center justify-between mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        <span>Usage: {usageDisplay.subtext}</span>
-                        <Clock className="w-3 h-3" />
-                      </div>
-                    </div>
-                  )}
-                </motion.div>
-              )})}
+                  apiKey={key}
+                  isSelected={selectedKeys.has(key.id)}
+                  onSelect={() => toggleKeySelection(key.id)}
+                  onEdit={() => setEditingKey(key)}
+                  onDelete={() => handleDelete(key.id, key.name)}
+                  onCopy={() => toast.success('API key copied to clipboard!')}
+                  getKeyStatus={getKeyStatus}
+                />
+              ))}
             </div>
           </div>
           
@@ -967,6 +767,13 @@ const ManageKeys: React.FC = () => {
           icon={Plus}
         />
       )}
+
+      <EditModal
+        isOpen={!!editingKey}
+        onClose={() => setEditingKey(null)}
+        apiKey={editingKey}
+        onSave={handleEdit}
+      />
     </div>
   );
 };
