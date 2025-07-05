@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -676,43 +677,59 @@ func generateRandomKey(length int) (string, error) {
 
 func parseExpiration(expirationStr string) (time.Duration, error) {
 	if len(expirationStr) < 2 {
-		return 0, errors.New("invalid expiration format")
+		return 0, errors.New("invalid expiration format: too short")
 	}
 
-	var numericPart, unit string
-	for i, char := range expirationStr {
-		if char < '0' || char > '9' {
-			numericPart = expirationStr[:i]
-			unit = expirationStr[i:]
-			break
-		}
+	expirationStr = strings.TrimSpace(strings.ToLower(expirationStr))
+
+	re := regexp.MustCompile(`^(\d+)([mhdwy]|mo)$`)
+	matches := re.FindStringSubmatch(expirationStr)
+
+	if len(matches) != 3 {
+		return 0, fmt.Errorf("invalid expiration format: '%s'. Expected format like '1d', '2w', '1mo', '1y'", expirationStr)
 	}
 
-	if numericPart == "" || unit == "" {
-		return 0, errors.New("invalid expiration format")
-	}
-
-	value, err := strconv.Atoi(numericPart)
+	valueStr, unit := matches[1], matches[2]
+	value, err := strconv.ParseInt(valueStr, 10, 64)
 	if err != nil || value <= 0 {
-		return 0, errors.New("invalid numeric value in expiration")
+		return 0, fmt.Errorf("invalid numeric value '%s' in expiration: must be a positive integer", valueStr)
 	}
+
+	var duration time.Duration
+	var maxValue int64
 
 	switch unit {
 	case "m":
-		return time.Duration(value) * time.Minute, nil
+		duration = time.Duration(value) * time.Minute
+		maxValue = 525600
 	case "h":
-		return time.Duration(value) * time.Hour, nil
+		duration = time.Duration(value) * time.Hour
+		maxValue = 8760
 	case "d":
-		return time.Duration(value) * 24 * time.Hour, nil
+		duration = time.Duration(value) * 24 * time.Hour
+		maxValue = 365
 	case "w":
-		return time.Duration(value) * 7 * 24 * time.Hour, nil
+		duration = time.Duration(value) * 7 * 24 * time.Hour
+		maxValue = 52
 	case "mo":
-		return time.Duration(value) * 30 * 24 * time.Hour, nil
+		duration = time.Duration(value) * 30 * 24 * time.Hour
+		maxValue = 12
 	case "y":
-		return time.Duration(value) * 365 * 24 * time.Hour, nil
+		duration = time.Duration(value) * 365 * 24 * time.Hour
+		maxValue = 5
 	default:
-		return 0, errors.New("invalid expiration unit")
+		return 0, fmt.Errorf("invalid expiration unit '%s': supported units are m, h, d, w, mo, y", unit)
 	}
+
+	if value > maxValue {
+		return 0, fmt.Errorf("expiration value %d%s exceeds maximum allowed (%d%s)", value, unit, maxValue, unit)
+	}
+
+	if duration < time.Minute {
+		return 0, errors.New("expiration duration must be at least 1 minute")
+	}
+
+	return duration, nil
 }
 
 func maskAPIKey(key string) string {
@@ -785,16 +802,33 @@ func (m *APIKeyManager) SaveAPIKey(apiKey *APIKey) error {
 
 func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
 	if err := m.validator.Struct(req); err != nil {
+		m.Warn("Invalid create key request", "error", err, "request", fmt.Sprintf("%+v", req))
 		return nil, fmt.Errorf("invalid request: %w", err)
+	}
+
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return nil, errors.New("API key name cannot be empty")
 	}
 
 	expirationDuration, err := parseExpiration(req.Expiration)
 	if err != nil {
+		m.Warn("Invalid expiration in request", "expiration", req.Expiration, "error", err)
 		return nil, fmt.Errorf("invalid expiration: %w", err)
 	}
 
+	m.Debug("Parsed expiration", "input", req.Expiration, "duration", expirationDuration)
+
 	var keyID string
 	if req.CustomKey != "" {
+		if len(req.CustomKey) < 16 || len(req.CustomKey) > 64 {
+			return nil, errors.New("custom API key must be between 16 and 64 characters")
+		}
+
+		if !isAlphaNumeric(req.CustomKey) {
+			return nil, errors.New("custom API key must contain only alphanumeric characters")
+		}
+
 		if _, exists := m.cache.GetAPIKey(req.CustomKey); exists {
 			return nil, errors.New("custom API key already exists")
 		}
@@ -803,6 +837,7 @@ func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
 		for i := 0; i < 10; i++ {
 			keyID, err = generateRandomKey(32)
 			if err != nil {
+				m.Error("Failed to generate random key", "attempt", i, "error", err)
 				return nil, fmt.Errorf("failed to generate key: %w", err)
 			}
 			if _, exists := m.cache.GetAPIKey(keyID); !exists {
@@ -811,15 +846,21 @@ func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
 			keyID = ""
 		}
 		if keyID == "" {
-			return nil, errors.New("failed to generate a unique API key")
+			return nil, errors.New("failed to generate a unique API key after 10 attempts")
 		}
 	}
 
 	now := time.Now().UTC()
+	expirationTime := now.Add(expirationDuration)
+
+	if !expirationTime.After(now) {
+		return nil, errors.New("calculated expiration time is not in the future")
+	}
+
 	apiKey := &APIKey{
 		ID:            keyID,
-		Name:          strings.TrimSpace(req.Name),
-		Expiration:    now.Add(expirationDuration),
+		Name:          req.Name,
+		Expiration:    expirationTime,
 		RPM:           req.RPM,
 		ThreadsLimit:  req.ThreadsLimit,
 		TotalRequests: req.TotalRequests,
@@ -830,17 +871,25 @@ func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
 		Metadata:      make(map[string]interface{}),
 	}
 
+	if err := m.validator.Struct(apiKey); err != nil {
+		m.Error("Generated API key failed validation", "error", err, "key", apiKey)
+		return nil, fmt.Errorf("generated API key is invalid: %w", err)
+	}
+
 	if err = m.SaveAPIKey(apiKey); err != nil {
+		m.Error("Failed to save API key to database", "keyId", maskAPIKey(keyID), "error", err)
 		return nil, fmt.Errorf("failed to save API key: %w", err)
 	}
 
 	m.cache.SetAPIKey(apiKey)
 
-	m.logMessage("INFO", "API Key generated", map[string]interface{}{
-		"component": "apikey",
-		"keyId":     maskAPIKey(apiKey.ID),
-		"name":      apiKey.Name,
-		"userId":    "admin",
+	m.logMessage("INFO", "API Key generated successfully", map[string]interface{}{
+		"component":  "apikey",
+		"keyId":      maskAPIKey(apiKey.ID),
+		"name":       apiKey.Name,
+		"expiration": apiKey.Expiration.Format(time.RFC3339),
+		"duration":   expirationDuration.String(),
+		"userId":     "admin",
 	})
 
 	m.broadcastEvent(WSMessage{
@@ -987,13 +1036,34 @@ func (m *APIKeyManager) healthHandler(c *gin.Context) {
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 
+	allKeys := m.cache.ListKeys()
+	now := time.Now().UTC()
+	activeKeys := 0
+	expiredKeys := 0
+
+	for _, key := range allKeys {
+		if !key.IsActive {
+			continue
+		}
+		if key.Expiration.After(now) {
+			activeKeys++
+		} else {
+			expiredKeys++
+		}
+	}
+
 	stats := map[string]interface{}{
 		"uptime":       uptime,
-		"totalKeys":    len(m.cache.ListKeys()),
+		"totalKeys":    len(allKeys),
+		"activeKeys":   activeKeys,
+		"expiredKeys":  expiredKeys,
 		"memoryUsage":  memStats.Alloc,
 		"mongoStatus":  m.isMongoConnected(),
 		"cacheHitRate": m.cache.GetHitRate(),
+		"cacheSize":    m.cache.Size(),
 		"goRoutines":   runtime.NumGoroutine(),
+		"serverTime":   time.Now().UTC().Format(time.RFC3339),
+		"timezone":     "UTC",
 	}
 
 	status := "healthy"
@@ -1111,7 +1181,7 @@ func (m *APIKeyManager) listAPIKeysHandler(c *gin.Context) {
 			case "active":
 				include = key.IsActive && key.Expiration.After(now)
 			case "expired":
-				include = key.Expiration.Before(now)
+				include = key.Expiration.Before(now) || key.Expiration.Equal(now)
 			case "inactive":
 				include = !key.IsActive
 			}
@@ -1195,36 +1265,61 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		return
 	}
 
+	changes := []string{}
 	updated := false
+
 	if req.Name != nil && strings.TrimSpace(*req.Name) != apiKey.Name {
+		if strings.TrimSpace(*req.Name) == "" {
+			m.respondWithError(c, http.StatusBadRequest, "API key name cannot be empty", "INVALID_NAME", nil)
+			return
+		}
 		apiKey.Name = strings.TrimSpace(*req.Name)
+		changes = append(changes, "name")
 		updated = true
 	}
+
 	if req.RPM != nil && *req.RPM != apiKey.RPM {
 		apiKey.RPM = *req.RPM
+		changes = append(changes, "rpm")
 		updated = true
 	}
+
 	if req.ThreadsLimit != nil && *req.ThreadsLimit != apiKey.ThreadsLimit {
 		apiKey.ThreadsLimit = *req.ThreadsLimit
+		changes = append(changes, "threadsLimit")
 		updated = true
 	}
+
 	if req.TotalRequests != nil && *req.TotalRequests != apiKey.TotalRequests {
 		apiKey.TotalRequests = *req.TotalRequests
+		changes = append(changes, "totalRequests")
 		updated = true
 	}
+
 	if req.IsActive != nil && *req.IsActive != apiKey.IsActive {
 		apiKey.IsActive = *req.IsActive
+		changes = append(changes, "isActive")
 		updated = true
 	}
+
 	if req.Expiration != nil {
 		expirationDuration, err := parseExpiration(*req.Expiration)
 		if err != nil {
-			m.respondWithError(c, http.StatusBadRequest, "Invalid expiration format", "INVALID_EXPIRATION", err)
+			m.Warn("Invalid expiration in update request", "keyId", keyID, "expiration", *req.Expiration, "error", err)
+			m.respondWithError(c, http.StatusBadRequest, fmt.Sprintf("Invalid expiration format: %v", err), "INVALID_EXPIRATION", err)
 			return
 		}
+
 		newExpiration := time.Now().UTC().Add(expirationDuration)
-		if !newExpiration.Equal(apiKey.Expiration) {
+
+		if !newExpiration.After(time.Now().UTC()) {
+			m.respondWithError(c, http.StatusBadRequest, "New expiration must be in the future", "INVALID_EXPIRATION_TIME", nil)
+			return
+		}
+
+		if newExpiration.Sub(apiKey.Expiration).Abs() > time.Second {
 			apiKey.Expiration = newExpiration
+			changes = append(changes, "expiration")
 			updated = true
 		}
 	}
@@ -1234,8 +1329,16 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		return
 	}
 
+	apiKey.UpdatedAt = time.Now().UTC()
+
+	if err := m.validator.Struct(apiKey); err != nil {
+		m.Error("Updated API key failed validation", "keyId", keyID, "error", err)
+		m.respondWithError(c, http.StatusBadRequest, "Updated key data is invalid", "VALIDATION_ERROR", err)
+		return
+	}
+
 	if err := m.SaveAPIKey(apiKey); err != nil {
-		m.Error("Failed to update API key", "keyId", keyID, "error", err)
+		m.Error("Failed to update API key in database", "keyId", keyID, "error", err)
 		m.respondWithError(c, http.StatusInternalServerError, "Failed to update API key", "UPDATE_FAILED", err)
 		return
 	}
@@ -1246,6 +1349,7 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		"component": "apikey",
 		"keyId":     maskAPIKey(apiKey.ID),
 		"name":      apiKey.Name,
+		"changes":   changes,
 		"userId":    c.GetString("userID"),
 	})
 
@@ -1256,7 +1360,7 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		ID:        generateRequestID(),
 	})
 
-	m.respondWithSuccess(c, m.toAPIKeyResponse(apiKey), "API key updated successfully")
+	m.respondWithSuccess(c, m.toAPIKeyResponse(apiKey), fmt.Sprintf("API key updated successfully (%s)", strings.Join(changes, ", ")))
 }
 
 func (m *APIKeyManager) deleteAPIKeyHandler(c *gin.Context) {

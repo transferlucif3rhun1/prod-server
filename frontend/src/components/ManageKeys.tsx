@@ -33,7 +33,52 @@ interface EditFormData {
 type ViewMode = 'table' | 'cards';
 type KeyStatus = 'active' | 'expired' | 'inactive';
 
-// Filter and search component
+const getKeyStatus = (key: APIKey): KeyStatus => {
+  if (!key.isActive) return 'inactive';
+  
+  const now = new Date();
+  const expirationDate = new Date(key.expiration);
+  
+  if (expirationDate <= now) {
+    return 'expired';
+  }
+  
+  return 'active';
+};
+
+const validateExpirationUpdate = (expirationStr: string): string | null => {
+  if (!expirationStr || expirationStr.length < 2) {
+    return 'Invalid expiration format';
+  }
+
+  const match = expirationStr.match(/^(\d+)([mhdwmy]|mo)$/);
+  if (!match) {
+    return 'Expiration must be in format like "1d", "2w", "1mo", "1y"';
+  }
+
+  const [, valueStr, unit] = match;
+  const value = parseInt(valueStr, 10);
+
+  if (value < 1) {
+    return 'Expiration value must be at least 1';
+  }
+
+  const maxValues: Record<string, number> = {
+    'm': 525600,
+    'h': 8760,
+    'd': 365,
+    'w': 52,
+    'mo': 12,
+    'y': 5
+  };
+
+  if (value > (maxValues[unit] || 365)) {
+    return `Maximum value for ${unit} is ${maxValues[unit]}`;
+  }
+
+  return null;
+};
+
 const FilterControls: React.FC<{
   searchTerm: string;
   filterStatus: string;
@@ -101,7 +146,6 @@ const FilterControls: React.FC<{
   </div>
 );
 
-// Action menu component
 const ActionMenu: React.FC<{
   keyId: string;
   keyName?: string;
@@ -160,7 +204,6 @@ const ActionMenu: React.FC<{
   );
 };
 
-// Key card component
 const KeyCard: React.FC<{
   apiKey: APIKey;
   isSelected: boolean;
@@ -168,11 +211,11 @@ const KeyCard: React.FC<{
   onEdit: () => void;
   onDelete: () => void;
   onCopy: () => void;
-  getKeyStatus: (key: APIKey) => KeyStatus;
-}> = ({ apiKey, isSelected, onSelect, onEdit, onDelete, onCopy, getKeyStatus }) => {
+}> = ({ apiKey, isSelected, onSelect, onEdit, onDelete, onCopy }) => {
   const [showActionMenu, setShowActionMenu] = useState(false);
   const [copyState, setCopyState] = useState(false);
   
+  const status = useMemo(() => getKeyStatus(apiKey), [apiKey]);
   const usageDisplay = useMemo(() => 
     formatUsageDisplay(Number(apiKey.usageCount), Number(apiKey.totalRequests)), 
     [apiKey.usageCount, apiKey.totalRequests]
@@ -188,6 +231,18 @@ const KeyCard: React.FC<{
       toast.error('Failed to copy to clipboard');
     }
   }, [apiKey.id, onCopy]);
+
+  const expirationDisplay = useMemo(() => {
+    const expirationDate = new Date(apiKey.expiration);
+    const now = new Date();
+    const isExpired = expirationDate <= now;
+    
+    return {
+      formatted: format(expirationDate, 'MMM dd, yyyy HH:mm'),
+      isExpired,
+      timeRemaining: isExpired ? 'Expired' : `Expires ${format(expirationDate, 'MMM dd, yyyy')}`
+    };
+  }, [apiKey.expiration]);
 
   return (
     <motion.div
@@ -208,13 +263,13 @@ const KeyCard: React.FC<{
               {apiKey.name || 'Untitled Key'}
             </h3>
             <p className="text-sm text-gray-500 dark:text-gray-400">
-              {apiKey.maskedKey}
+              {apiKey.maskedKey || `${apiKey.id.substring(0, 4)}...${apiKey.id.substring(apiKey.id.length - 4)}`}
             </p>
           </div>
         </div>
         <div className="flex items-center space-x-2">
-          <StatusBadge status={getKeyStatus(apiKey)}>
-            {getKeyStatus(apiKey)}
+          <StatusBadge status={status}>
+            {status}
           </StatusBadge>
           <div className="relative">
             <button
@@ -257,7 +312,9 @@ const KeyCard: React.FC<{
         <div className="flex items-center space-x-2">
           <Calendar className="w-4 h-4 text-purple-500" />
           <span className="text-gray-600 dark:text-gray-400">Expires:</span>
-          <span className="font-medium">{format(new Date(apiKey.expiration), 'MMM dd, yyyy')}</span>
+          <span className={`font-medium ${expirationDisplay.isExpired ? 'text-red-500' : 'text-gray-900 dark:text-white'}`}>
+            {format(new Date(apiKey.expiration), 'MMM dd, yyyy')}
+          </span>
         </div>
       </div>
       
@@ -271,6 +328,9 @@ const KeyCard: React.FC<{
           </div>
           <div className="flex items-center justify-between mt-1 text-xs text-gray-500 dark:text-gray-400">
             <span>Usage: {usageDisplay.subtext}</span>
+            <span className={expirationDisplay.isExpired ? 'text-red-500' : ''}>
+              {expirationDisplay.timeRemaining}
+            </span>
           </div>
         </div>
       )}
@@ -278,7 +338,6 @@ const KeyCard: React.FC<{
   );
 };
 
-// Edit modal component
 const EditModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -292,6 +351,7 @@ const EditModal: React.FC<{
     totalRequests: 0,
     isActive: true
   });
+  const [expirationString, setExpirationString] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -304,23 +364,59 @@ const EditModal: React.FC<{
         totalRequests: apiKey.totalRequests,
         isActive: apiKey.isActive
       });
+      setExpirationString('');
     }
   }, [apiKey]);
+
+  const validateForm = useCallback(() => {
+    const newErrors: Record<string, string> = {};
+    
+    if (formData.name.trim().length < 1) {
+      newErrors.name = 'Name is required';
+    }
+    
+    if (formData.rpm < 0 || formData.rpm > 10000) {
+      newErrors.rpm = 'RPM must be between 0 and 10000';
+    }
+    
+    if (formData.threadsLimit < 0 || formData.threadsLimit > 1000) {
+      newErrors.threadsLimit = 'Thread limit must be between 0 and 1000';
+    }
+    
+    if (formData.totalRequests < 0) {
+      newErrors.totalRequests = 'Total requests must be 0 or greater';
+    }
+    
+    if (expirationString) {
+      const expirationError = validateExpirationUpdate(expirationString);
+      if (expirationError) {
+        newErrors.expiration = expirationError;
+      }
+    }
+    
+    setErrors(newErrors);
+    return Object.keys(newErrors).length === 0;
+  }, [formData, expirationString]);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     if (!apiKey) return;
 
+    if (!validateForm()) {
+      toast.error('Please fix the form errors');
+      return;
+    }
+
     setIsLoading(true);
     try {
       const updateData: UpdateKeyRequest = {};
       
-      // Only include changed values
       if (formData.name !== apiKey.name) updateData.name = formData.name;
       if (formData.rpm !== apiKey.rpm) updateData.rpm = formData.rpm;
       if (formData.threadsLimit !== apiKey.threadsLimit) updateData.threadsLimit = formData.threadsLimit;
       if (formData.totalRequests !== apiKey.totalRequests) updateData.totalRequests = formData.totalRequests;
       if (formData.isActive !== apiKey.isActive) updateData.isActive = formData.isActive;
+      if (expirationString) updateData.expiration = expirationString;
 
       if (Object.keys(updateData).length === 0) {
         toast.info('No changes detected');
@@ -335,7 +431,7 @@ const EditModal: React.FC<{
     } finally {
       setIsLoading(false);
     }
-  }, [apiKey, formData, onSave, onClose]);
+  }, [apiKey, formData, expirationString, onSave, onClose, validateForm]);
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Edit API Key">
@@ -379,6 +475,14 @@ const EditModal: React.FC<{
           error={errors.totalRequests}
         />
 
+        <FormInput
+          label="New Expiration (Optional)"
+          value={expirationString}
+          onChange={(value) => setExpirationString(value as string)}
+          placeholder="e.g., 7d, 1mo, 1y (leave empty to keep current)"
+          error={errors.expiration}
+        />
+
         <div className="flex items-center space-x-2">
           <input
             type="checkbox"
@@ -415,7 +519,6 @@ const EditModal: React.FC<{
   );
 };
 
-// Main component
 const ManageKeys: React.FC = () => {
   const { 
     apiKeys, 
@@ -442,24 +545,14 @@ const ManageKeys: React.FC = () => {
 
   const itemsPerPage = 10;
 
-  const getKeyStatus = useCallback((key: APIKey): KeyStatus => {
-    const now = new Date();
-    const expirationDate = new Date(key.expiration);
-    
-    if (!key.isActive) return 'inactive';
-    if (expirationDate <= now) return 'expired';
-    return 'active';
-  }, []);
-
   const totalCounts = useMemo(() => {
     const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
-    const now = new Date();
     
     return {
       total: safeApiKeys.length,
-      active: safeApiKeys.filter(key => key.isActive && new Date(key.expiration) > now).length,
-      expired: safeApiKeys.filter(key => new Date(key.expiration) <= now).length,
-      inactive: safeApiKeys.filter(key => !key.isActive).length
+      active: safeApiKeys.filter(key => getKeyStatus(key) === 'active').length,
+      expired: safeApiKeys.filter(key => getKeyStatus(key) === 'expired').length,
+      inactive: safeApiKeys.filter(key => getKeyStatus(key) === 'inactive').length
     };
   }, [apiKeys]);
 
@@ -495,7 +588,6 @@ const ManageKeys: React.FC = () => {
     }
   }, [setApiKeys, setKeysLoading, setKeysError, retryAttempts, lastFetchTime]);
 
-  // Filter keys based on search and status
   useEffect(() => {
     const safeApiKeys = Array.isArray(apiKeys) ? apiKeys : [];
     let filtered = [...safeApiKeys];
@@ -515,7 +607,7 @@ const ManageKeys: React.FC = () => {
 
     setFilteredKeys(filtered);
     setCurrentPage(1);
-  }, [apiKeys, searchTerm, filterStatus, getKeyStatus]);
+  }, [apiKeys, searchTerm, filterStatus]);
 
   useEffect(() => {
     fetchKeys();
@@ -611,7 +703,7 @@ const ManageKeys: React.FC = () => {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
     toast.success(`Exported ${filteredKeys.length} API keys`);
-  }, [filteredKeys, getKeyStatus]);
+  }, [filteredKeys]);
 
   const toggleKeySelection = useCallback((keyId: string) => {
     const newSelected = new Set(selectedKeys);
@@ -722,7 +814,6 @@ const ManageKeys: React.FC = () => {
                   onEdit={() => setEditingKey(key)}
                   onDelete={() => handleDelete(key.id, key.name)}
                   onCopy={() => toast.success('API key copied to clipboard!')}
-                  getKeyStatus={getKeyStatus}
                 />
               ))}
             </div>

@@ -37,7 +37,6 @@ interface ExpirationUnit {
   icon: React.ElementType;
 }
 
-// Configuration constants
 const EXPIRATION_UNITS: ExpirationUnit[] = [
   { value: 'm', label: 'Minutes', icon: Timer },
   { value: 'h', label: 'Hours', icon: Clock },
@@ -89,7 +88,6 @@ const PRESETS: PresetConfig[] = [
   }
 ];
 
-// Validation rules
 const VALIDATION_RULES = {
   name: { min: 2, max: 50, required: true },
   rpm: { min: 0, max: 10000 },
@@ -99,7 +97,40 @@ const VALIDATION_RULES = {
   expirationValue: { min: 1 }
 };
 
-// Success notification component
+const validateExpirationFormat = (value: string, unit: string): string | null => {
+  const numValue = parseInt(value, 10);
+  if (isNaN(numValue) || numValue < 1) {
+    return 'Expiration value must be at least 1';
+  }
+  
+  if (numValue > 1000) {
+    return 'Expiration value too large';
+  }
+  
+  switch (unit) {
+    case 'm':
+      if (numValue > 525600) return 'Maximum 525,600 minutes (1 year)';
+      break;
+    case 'h':
+      if (numValue > 8760) return 'Maximum 8,760 hours (1 year)';
+      break;
+    case 'd':
+      if (numValue > 365) return 'Maximum 365 days';
+      break;
+    case 'w':
+      if (numValue > 52) return 'Maximum 52 weeks';
+      break;
+    case 'mo':
+      if (numValue > 12) return 'Maximum 12 months';
+      break;
+    case 'y':
+      if (numValue > 5) return 'Maximum 5 years';
+      break;
+  }
+  
+  return null;
+};
+
 const SuccessNotification: React.FC<{ apiKey: APIKey; onClose: () => void }> = ({ apiKey, onClose }) => (
   <motion.div
     initial={{ opacity: 0, y: -20, scale: 0.95 }}
@@ -157,7 +188,6 @@ const SuccessNotification: React.FC<{ apiKey: APIKey; onClose: () => void }> = (
   </motion.div>
 );
 
-// Preset selector component
 const PresetSelector: React.FC<{ onSelect: (preset: PresetConfig) => void }> = ({ onSelect }) => (
   <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 p-6">
     <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-4">
@@ -189,7 +219,6 @@ const PresetSelector: React.FC<{ onSelect: (preset: PresetConfig) => void }> = (
   </div>
 );
 
-// Configuration preview component
 const ConfigPreview: React.FC<{ formData: FormData }> = ({ formData }) => {
   const getUnitDisplayName = useCallback((unit: string) => {
     const unitObj = EXPIRATION_UNITS.find(u => u.value === unit);
@@ -229,46 +258,45 @@ const CreateKey: React.FC = () => {
   const [createdKey, setCreatedKey] = useState<APIKey | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  // Sync form data with store
+  const updateExpiration = useCallback((value: string, unit: string) => {
+    return value + unit;
+  }, []);
+
   useEffect(() => {
     const { expirationValue, expirationUnit, ...rest } = formData;
+    const expiration = updateExpiration(expirationValue, expirationUnit);
     const updatedData = {
       ...rest,
-      expiration: expirationValue + expirationUnit,
+      expiration,
       expirationValue,
       expirationUnit
     };
     setCreateKeyForm(updatedData);
-  }, [formData, setCreateKeyForm]);
+  }, [formData, setCreateKeyForm, updateExpiration]);
 
   const validateForm = useCallback((): boolean => {
     const newErrors: Record<string, string> = {};
 
-    // Name validation
     const nameError = validateApiKeyName(formData.name);
     if (nameError) newErrors.name = nameError;
 
-    // RPM validation
     if (formData.rpm < VALIDATION_RULES.rpm.min || formData.rpm > VALIDATION_RULES.rpm.max) {
       newErrors.rpm = `RPM must be between ${VALIDATION_RULES.rpm.min} and ${VALIDATION_RULES.rpm.max} (0 = unlimited)`;
     }
 
-    // Thread limit validation
     if (formData.threadsLimit < VALIDATION_RULES.threadsLimit.min || formData.threadsLimit > VALIDATION_RULES.threadsLimit.max) {
       newErrors.threadsLimit = `Thread limit must be between ${VALIDATION_RULES.threadsLimit.min} and ${VALIDATION_RULES.threadsLimit.max} (0 = unlimited)`;
     }
 
-    // Total requests validation
     if (formData.totalRequests < VALIDATION_RULES.totalRequests.min) {
       newErrors.totalRequests = 'Total requests must be 0 or greater (0 = unlimited)';
     }
 
-    // Expiration validation
-    if (!formData.expirationValue || parseInt(formData.expirationValue, 10) < VALIDATION_RULES.expirationValue.min) {
-      newErrors.expiration = 'Expiration value must be at least 1';
+    const expirationError = validateExpirationFormat(formData.expirationValue, formData.expirationUnit);
+    if (expirationError) {
+      newErrors.expiration = expirationError;
     }
 
-    // Custom key validation
     if (formData.customKey) {
       const customKeyError = validateCustomKey(formData.customKey);
       if (customKeyError) newErrors.customKey = customKeyError;
@@ -279,23 +307,37 @@ const CreateKey: React.FC = () => {
   }, [formData]);
 
   const handleInputChange = useCallback((field: keyof FormData, value: string | number) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+    setFormData(prev => {
+      const updated = { ...prev, [field]: value };
+      
+      if (field === 'expirationValue' || field === 'expirationUnit') {
+        const newValue = field === 'expirationValue' ? String(value) : prev.expirationValue;
+        const newUnit = field === 'expirationUnit' ? String(value) : prev.expirationUnit;
+        updated.expiration = updateExpiration(newValue, newUnit);
+      }
+      
+      return updated;
+    });
     
-    // Clear error for this field
     if (errors[field]) {
       setErrors(prev => ({ ...prev, [field]: '' }));
     }
-  }, [errors]);
+  }, [errors, updateExpiration]);
 
   const applyPreset = useCallback((preset: PresetConfig) => {
+    const expirationValue = preset.data.expirationValue || '30';
+    const expirationUnit = preset.data.expirationUnit || 'd';
+    
     setFormData(prev => ({
       ...prev,
       ...preset.data,
-      expiration: preset.data.expirationValue + preset.data.expirationUnit
+      expirationValue,
+      expirationUnit,
+      expiration: updateExpiration(expirationValue, expirationUnit)
     }));
     setErrors({});
     toast.success(`Applied ${preset.name} preset`);
-  }, []);
+  }, [updateExpiration]);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
@@ -309,13 +351,17 @@ const CreateKey: React.FC = () => {
 
     try {
       const { expirationValue: _expirationValue, expirationUnit: _expirationUnit, ...submitData } = formData;
+      
+      if (!submitData.expiration) {
+        submitData.expiration = updateExpiration(formData.expirationValue, formData.expirationUnit);
+      }
+      
       const response = await apiService.createKey(submitData);
       
       setCreatedKey(response.data);
       addApiKey(response.data);
       toast.success('API key created successfully!');
       
-      // Reset form partially
       setFormData(prev => ({
         ...prev,
         name: '',
@@ -337,7 +383,7 @@ const CreateKey: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [formData, validateForm, addApiKey]);
+  }, [formData, validateForm, addApiKey, updateExpiration]);
 
   const resetForm = useCallback(() => {
     const defaultForm: FormData = {
@@ -484,6 +530,9 @@ const CreateKey: React.FC = () => {
                     ))}
                   </select>
                 </div>
+                {errors.expiration && (
+                  <p className="text-sm text-red-500 mt-1">{errors.expiration}</p>
+                )}
               </div>
 
               <ActionButton
