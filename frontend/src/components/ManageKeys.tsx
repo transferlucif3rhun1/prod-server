@@ -2,7 +2,9 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search, MoreVertical, Edit3, Trash2, RefreshCw, Download,
-  Calendar, Activity, Users, Zap, Plus, Copy, Clock
+  Calendar, Activity, Users, Zap, Plus, Copy, Clock, 
+  HelpCircle, AlertTriangle, CheckCircle, X, User, Timer,
+  Hash, Shield, Settings
 } from 'lucide-react';
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
@@ -42,6 +44,32 @@ const getKeyStatus = (key: APIKey): KeyStatus => {
   }
   
   return 'active';
+};
+
+const getStatusColor = (status: KeyStatus): string => {
+  switch (status) {
+    case 'active': return 'bg-green-100 text-green-800 border-green-200';
+    case 'expired': return 'bg-red-100 text-red-800 border-red-200';
+    case 'inactive': return 'bg-gray-100 text-gray-800 border-gray-200';
+    default: return 'bg-gray-100 text-gray-800 border-gray-200';
+  }
+};
+
+const getExpirationWarning = (expiration: string): { isWarning: boolean; daysLeft: number; color: string } => {
+  const expirationDate = new Date(expiration);
+  const now = new Date();
+  const diffTime = expirationDate.getTime() - now.getTime();
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  
+  if (diffDays <= 0) {
+    return { isWarning: true, daysLeft: diffDays, color: 'bg-red-100 text-red-800 border-red-200' };
+  } else if (diffDays <= 3) {
+    return { isWarning: true, daysLeft: diffDays, color: 'bg-orange-100 text-orange-800 border-orange-200' };
+  } else if (diffDays <= 7) {
+    return { isWarning: false, daysLeft: diffDays, color: 'bg-yellow-100 text-yellow-800 border-yellow-200' };
+  }
+  
+  return { isWarning: false, daysLeft: diffDays, color: 'bg-blue-100 text-blue-800 border-blue-200' };
 };
 
 const validateExpirationUpdate = (expirationStr: string): string | null => {
@@ -150,6 +178,55 @@ const FilterControls: React.FC<{
   </div>
 );
 
+const Tooltip: React.FC<{ content: string; children: React.ReactNode }> = ({ content, children }) => {
+  const [isVisible, setIsVisible] = useState(false);
+
+  return (
+    <div className="relative inline-block">
+      <div
+        onMouseEnter={() => setIsVisible(true)}
+        onMouseLeave={() => setIsVisible(false)}
+        className="cursor-help"
+      >
+        {children}
+      </div>
+      {isVisible && (
+        <div className="absolute bottom-full left-1/2 transform -translate-x-1/2 mb-2 px-3 py-2 bg-gray-900 text-white text-xs rounded-lg shadow-lg z-50 whitespace-nowrap">
+          {content}
+          <div className="absolute top-full left-1/2 transform -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-l-transparent border-r-transparent border-t-gray-900"></div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const ProgressBar: React.FC<{ 
+  current: number; 
+  max: number; 
+  label: string;
+  color?: string;
+}> = ({ current, max, label, color = "bg-blue-500" }) => {
+  const percentage = max === 0 ? 0 : Math.min((current / max) * 100, 100);
+  const isUnlimited = max === 0;
+  
+  return (
+    <div className="space-y-1">
+      <div className="flex justify-between text-xs text-gray-600 dark:text-gray-400">
+        <span>{label}</span>
+        <span>{isUnlimited ? 'Unlimited' : `${current.toLocaleString()} / ${max.toLocaleString()}`}</span>
+      </div>
+      {!isUnlimited && (
+        <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
+          <div 
+            className={`${color} h-2 rounded-full transition-all duration-300`}
+            style={{ width: `${percentage}%` }}
+          />
+        </div>
+      )}
+    </div>
+  );
+};
+
 const KeyCard: React.FC<{
   apiKey: APIKey;
   isSelected: boolean;
@@ -159,12 +236,24 @@ const KeyCard: React.FC<{
   onCopy: () => void;
 }> = ({ apiKey, isSelected, onSelect, onEdit, onDelete, onCopy }) => {
   const [showActionMenu, setShowActionMenu] = useState(false);
+  const [showFullName, setShowFullName] = useState(false);
   
   const status = useMemo(() => getKeyStatus(apiKey), [apiKey]);
+  const statusColor = useMemo(() => getStatusColor(status), [status]);
+  const expirationInfo = useMemo(() => getExpirationWarning(apiKey.expiration), [apiKey.expiration]);
+  
   const usageDisplay = useMemo(() => 
     formatUsageDisplay(Number(apiKey.usageCount), Number(apiKey.totalRequests)), 
     [apiKey.usageCount, apiKey.totalRequests]
   );
+
+  const keyEnvironment = useMemo(() => {
+    const name = apiKey.name?.toLowerCase() || '';
+    if (name.includes('prod') || name.includes('production')) return { tag: 'PROD', color: 'bg-red-100 text-red-800' };
+    if (name.includes('test') || name.includes('staging')) return { tag: 'TEST', color: 'bg-yellow-100 text-yellow-800' };
+    if (name.includes('dev') || name.includes('development')) return { tag: 'DEV', color: 'bg-green-100 text-green-800' };
+    return null;
+  }, [apiKey.name]);
 
   const handleCopy = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -219,112 +308,140 @@ const KeyCard: React.FC<{
     }
   }, [showActionMenu]);
 
+  const displayName = apiKey.name || 'Untitled Key';
+  const isNameTruncated = displayName.length > 25;
+  const truncatedName = isNameTruncated ? `${displayName.substring(0, 25)}...` : displayName;
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-md transition-all duration-200 bg-white dark:bg-gray-800"
+      className={`p-5 border-2 border-gray-200 dark:border-gray-700 rounded-2xl hover:shadow-lg transition-all duration-300 bg-white dark:bg-gray-800 hover:scale-[1.02] border-l-4 ${
+        status === 'active' ? 'border-l-green-500' : 
+        status === 'expired' ? 'border-l-red-500' : 
+        'border-l-gray-400'
+      }`}
     >
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between mb-4">
         <div className="flex items-center space-x-3">
           <input
             type="checkbox"
             checked={isSelected}
             onChange={onSelect}
-            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4"
           />
-          <div>
-            <h3 className="font-medium text-gray-900 dark:text-white">
-              {apiKey.name || 'Untitled Key'}
-            </h3>
-            <p className="text-sm text-gray-500 dark:text-gray-400">
+          <div className="space-y-1">
+            <div className="flex items-center space-x-2">
+              <div
+                className="relative"
+                onMouseEnter={() => setShowFullName(true)}
+                onMouseLeave={() => setShowFullName(false)}
+              >
+                <h3 className="font-semibold text-gray-900 dark:text-white text-base">
+                  {isNameTruncated && !showFullName ? truncatedName : displayName}
+                </h3>
+                {showFullName && isNameTruncated && (
+                  <div className="absolute top-full left-0 mt-1 px-3 py-2 bg-gray-900 text-white text-sm rounded-lg shadow-lg z-50 whitespace-nowrap">
+                    {displayName}
+                  </div>
+                )}
+              </div>
+              {keyEnvironment && (
+                <span className={`px-2 py-1 text-xs font-medium rounded-full ${keyEnvironment.color}`}>
+                  {keyEnvironment.tag}
+                </span>
+              )}
+            </div>
+            <p className="text-sm text-gray-500 dark:text-gray-400 font-mono">
               {apiKey.maskedKey || `${apiKey.id.substring(0, 4)}...${apiKey.id.substring(apiKey.id.length - 4)}`}
             </p>
           </div>
         </div>
         <div className="flex items-center space-x-2">
-          <StatusBadge status={status}>
-            {status}
-          </StatusBadge>
-          <button
-            onClick={handleCopy}
-            className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
-            title="Copy API Key"
-          >
-            <Copy className="w-4 h-4" />
-          </button>
-          <div className="relative">
+          <span className={`px-3 py-1 rounded-full text-xs font-medium border ${statusColor}`}>
+            {status.charAt(0).toUpperCase() + status.slice(1)}
+          </span>
+          <Tooltip content="Copy API Key">
             <button
-              onClick={toggleMenu}
-              className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+              onClick={handleCopy}
+              className="p-2 text-gray-400 hover:text-blue-600 dark:hover:text-blue-400 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
             >
-              <MoreVertical className="w-4 h-4" />
+              <Copy className="w-4 h-4" />
             </button>
+          </Tooltip>
+          <div className="relative">
+            <Tooltip content="Edit / Delete">
+              <button
+                onClick={toggleMenu}
+                className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+              >
+                <MoreVertical className="w-4 h-4" />
+              </button>
+            </Tooltip>
             {showActionMenu && (
-              <div className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 min-w-[120px]">
+              <motion.div
+                initial={{ opacity: 0, scale: 0.95 }}
+                animate={{ opacity: 1, scale: 1 }}
+                className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-xl shadow-lg z-50 min-w-[140px] overflow-hidden"
+              >
                 <button
                   onClick={handleEdit}
-                  className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 rounded-t-lg"
+                  className="w-full text-left px-4 py-3 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 flex items-center space-x-2 transition-colors"
                 >
                   <Edit3 className="w-4 h-4" />
-                  <span>Edit</span>
+                  <span>Edit Key</span>
                 </button>
                 <button
                   onClick={handleDelete}
-                  className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center space-x-2 rounded-b-lg"
+                  className="w-full text-left px-4 py-3 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center space-x-2 transition-colors"
                 >
                   <Trash2 className="w-4 h-4" />
-                  <span>Delete</span>
+                  <span>Delete Key</span>
                 </button>
-              </div>
+              </motion.div>
             )}
           </div>
         </div>
       </div>
       
-      <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-        <div className="flex items-center space-x-2">
-          <Zap className="w-4 h-4 text-yellow-500" />
-          <span className="text-gray-600 dark:text-gray-400">RPM:</span>
-          <span className="font-medium">{formatValue(apiKey.rpm)}</span>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+        <div className="space-y-2">
+          <div className="flex items-center space-x-2 text-sm">
+            <Timer className="w-4 h-4 text-yellow-500" />
+            <span className="text-gray-600 dark:text-gray-400">RPM Limit:</span>
+            <span className="font-semibold">{apiKey.rpm === 0 ? 'Unlimited' : formatValue(apiKey.rpm)}</span>
+          </div>
+          <div className="flex items-center space-x-2 text-sm">
+            <User className="w-4 h-4 text-blue-500" />
+            <span className="text-gray-600 dark:text-gray-400">Thread Limit:</span>
+            <span className="font-semibold">{apiKey.threadsLimit === 0 ? 'Unlimited' : formatValue(apiKey.threadsLimit)}</span>
+          </div>
         </div>
-        <div className="flex items-center space-x-2">
-          <Users className="w-4 h-4 text-blue-500" />
-          <span className="text-gray-600 dark:text-gray-400">Threads:</span>
-          <span className="font-medium">{formatValue(apiKey.threadsLimit)}</span>
-        </div>
-        <div className="flex items-center space-x-2">
-          <Activity className="w-4 h-4 text-green-500" />
-          <span className="text-gray-600 dark:text-gray-400">Usage:</span>
-          <span className="font-medium" title={usageDisplay.subtext}>
-            {usageDisplay.text}
-          </span>
-        </div>
-        <div className="flex items-center space-x-2">
-          <Calendar className="w-4 h-4 text-purple-500" />
-          <span className="text-gray-600 dark:text-gray-400">Expires:</span>
-          <span className={`font-medium ${expirationDisplay.isExpired ? 'text-red-500' : 'text-gray-900 dark:text-white'}`}>
-            {format(new Date(apiKey.expiration), 'MMM dd, yyyy')}
-          </span>
+        
+        <div className="space-y-2">
+          <ProgressBar
+            current={Number(apiKey.usageCount)}
+            max={Number(apiKey.totalRequests)}
+            label="Usage"
+            color={usageDisplay.percentage && usageDisplay.percentage > 80 ? "bg-red-500" : "bg-blue-500"}
+          />
         </div>
       </div>
       
-      {!usageDisplay.isUnlimited && usageDisplay.percentage !== null && (
-        <div className="mt-3">
-          <div className="w-full bg-gray-200 dark:bg-gray-700 rounded-full h-2">
-            <div 
-              className="bg-blue-600 h-2 rounded-full transition-all duration-300"
-              style={{ width: `${usageDisplay.percentage}%` }}
-            />
-          </div>
-          <div className="flex items-center justify-between mt-1 text-xs text-gray-500 dark:text-gray-400">
-            <span>Usage: {usageDisplay.subtext}</span>
-            <span className={expirationDisplay.isExpired ? 'text-red-500' : ''}>
-              {expirationDisplay.timeRemaining}
-            </span>
-          </div>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center space-x-2">
+          <Calendar className="w-4 h-4 text-purple-500" />
+          <span className={`text-sm px-3 py-1 rounded-full border ${expirationInfo.color}`}>
+            {expirationInfo.daysLeft <= 0 ? 'Expired' : 
+             expirationInfo.daysLeft === 1 ? 'Expires today' :
+             expirationInfo.daysLeft <= 7 ? `${expirationInfo.daysLeft} days left` :
+             `Expires ${format(new Date(apiKey.expiration), 'MMM dd')}`}
+          </span>
         </div>
-      )}
+        <div className="text-xs text-gray-500 dark:text-gray-400">
+          Created {format(new Date(apiKey.createdAt), 'MMM dd, yyyy')}
+        </div>
+      </div>
     </motion.div>
   );
 };
@@ -361,6 +478,7 @@ const EditModal: React.FC<{
   const [updateExpiration, setUpdateExpiration] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const [warnings, setWarnings] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (apiKey) {
@@ -375,11 +493,13 @@ const EditModal: React.FC<{
       setExpirationUnit('d');
       setUpdateExpiration(false);
       setErrors({});
+      setWarnings({});
     }
   }, [apiKey]);
 
   const validateForm = useCallback(() => {
     const newErrors: Record<string, string> = {};
+    const newWarnings: Record<string, string> = {};
     
     if (!formData.name || formData.name.trim().length < 1) {
       newErrors.name = 'Name is required';
@@ -395,6 +515,14 @@ const EditModal: React.FC<{
     
     if (formData.totalRequests < 0) {
       newErrors.totalRequests = 'Total requests must be 0 or greater';
+    }
+
+    // Check for conflicting values
+    if (formData.rpm > 0 && formData.totalRequests > 0) {
+      const estimatedTime = formData.totalRequests / formData.rpm;
+      if (estimatedTime < 1) {
+        newWarnings.conflict = `With ${formData.rpm} RPM, ${formData.totalRequests} requests will complete in less than 1 minute`;
+      }
     }
     
     if (updateExpiration) {
@@ -413,6 +541,7 @@ const EditModal: React.FC<{
     }
     
     setErrors(newErrors);
+    setWarnings(newWarnings);
     return Object.keys(newErrors).length === 0;
   }, [formData, expirationValue, expirationUnit, updateExpiration]);
 
@@ -471,141 +600,231 @@ const EditModal: React.FC<{
     if (errors[field]) {
       setErrors(prev => ({ ...prev, [field]: '' }));
     }
-  }, [errors]);
+    if (warnings[field]) {
+      setWarnings(prev => ({ ...prev, [field]: '' }));
+    }
+  }, [errors, warnings]);
 
   if (!isOpen) return null;
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Edit API Key">
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <FormInput
-          label="Name"
-          value={formData.name}
-          onChange={(value) => handleInputChange('name', value)}
-          placeholder="API Key Name"
-          error={errors.name}
-          required
-        />
-
-        <div className="grid grid-cols-2 gap-4">
-          <FormInput
-            label="RPM (0 = Unlimited)"
-            value={formData.rpm}
-            onChange={(value) => handleInputChange('rpm', Number(value))}
-            type="number"
-            min={0}
-            max={10000}
-            error={errors.rpm}
-          />
-
-          <FormInput
-            label="Threads (0 = Unlimited)"
-            value={formData.threadsLimit}
-            onChange={(value) => handleInputChange('threadsLimit', Number(value))}
-            type="number"
-            min={0}
-            max={1000}
-            error={errors.threadsLimit}
-          />
+      <form onSubmit={handleSubmit} className="space-y-5">
+        <div className="space-y-4">
+          <div className="flex items-center space-x-2 mb-3">
+            <Shield className="w-5 h-5 text-blue-500" />
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Key Information</h3>
+          </div>
+          
+          <div className="relative">
+            <label className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              <Edit3 className="w-4 h-4 mr-2 text-blue-500" />
+              Name
+              <Tooltip content="A descriptive name for your API key to help you identify its purpose">
+                <HelpCircle className="w-4 h-4 ml-1 text-gray-400" />
+              </Tooltip>
+            </label>
+            <FormInput
+              value={formData.name}
+              onChange={(value) => handleInputChange('name', value)}
+              placeholder="e.g., Production API Key"
+              error={errors.name}
+              required
+              aria-label="API Key Name"
+            />
+          </div>
         </div>
 
-        <FormInput
-          label="Total Requests (0 = Unlimited)"
-          value={formData.totalRequests}
-          onChange={(value) => handleInputChange('totalRequests', Number(value))}
-          type="number"
-          min={0}
-          error={errors.totalRequests}
-        />
+        <div className="bg-gray-50 dark:bg-gray-800 p-4 rounded-xl border border-gray-200 dark:border-gray-700 space-y-4">
+          <div className="flex items-center space-x-2 mb-3">
+            <Settings className="w-5 h-5 text-green-500" />
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Rate Limits & Usage</h3>
+          </div>
+          
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="relative">
+              <label className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                <Timer className="w-4 h-4 mr-2 text-yellow-500" />
+                RPM (0 = Unlimited)
+                <Tooltip content="Requests per minute - how many API calls can be made per minute">
+                  <HelpCircle className="w-4 h-4 ml-1 text-gray-400" />
+                </Tooltip>
+              </label>
+              <FormInput
+                value={formData.rpm}
+                onChange={(value) => handleInputChange('rpm', Number(value))}
+                type="number"
+                min={0}
+                max={10000}
+                error={errors.rpm}
+                aria-label="Requests per minute limit"
+              />
+            </div>
+
+            <div className="relative">
+              <label className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                <User className="w-4 h-4 mr-2 text-blue-500" />
+                Threads (0 = Unlimited)
+                <Tooltip content="Maximum number of concurrent connections allowed">
+                  <HelpCircle className="w-4 h-4 ml-1 text-gray-400" />
+                </Tooltip>
+              </label>
+              <FormInput
+                value={formData.threadsLimit}
+                onChange={(value) => handleInputChange('threadsLimit', Number(value))}
+                type="number"
+                min={0}
+                max={1000}
+                error={errors.threadsLimit}
+                aria-label="Thread limit"
+              />
+            </div>
+          </div>
+
+          <div className="relative">
+            <label className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+              <Hash className="w-4 h-4 mr-2 text-green-500" />
+              Total Requests (0 = Unlimited)
+              <Tooltip content="Total number of requests this key can make before expiring">
+                <HelpCircle className="w-4 h-4 ml-1 text-gray-400" />
+              </Tooltip>
+            </label>
+            <FormInput
+              value={formData.totalRequests}
+              onChange={(value) => handleInputChange('totalRequests', Number(value))}
+              type="number"
+              min={0}
+              error={errors.totalRequests}
+              aria-label="Total requests limit"
+            />
+          </div>
+
+          {warnings.conflict && (
+            <div className="flex items-center space-x-2 p-3 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-lg">
+              <AlertTriangle className="w-4 h-4 text-yellow-600" />
+              <span className="text-sm text-yellow-800 dark:text-yellow-300">{warnings.conflict}</span>
+            </div>
+          )}
+        </div>
 
         <div className="space-y-4">
-          <div className="flex items-center space-x-2">
+          <div className="flex items-center space-x-3">
             <input
               type="checkbox"
               id="updateExpiration"
               checked={updateExpiration}
               onChange={(e) => setUpdateExpiration(e.target.checked)}
-              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4"
+              aria-label="Update expiration"
             />
-            <label htmlFor="updateExpiration" className="text-sm font-medium text-gray-700 dark:text-gray-300">
+            <label htmlFor="updateExpiration" className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300">
+              <Clock className="w-4 h-4 mr-2 text-purple-500" />
               Update Expiration
             </label>
           </div>
           
-          {updateExpiration && (
-            <div className="space-y-3">
-              <label className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300">
-                <Clock className="w-4 h-4 mr-2 text-green-500" />
-                New Expiration (from now)
-              </label>
-              <div className="flex space-x-3">
-                <FormInput
-                  label=""
-                  value={expirationValue}
-                  onChange={(value) => {
-                    setExpirationValue(String(value));
-                    if (errors.expiration) {
-                      setErrors(prev => ({ ...prev, expiration: '' }));
-                    }
-                  }}
-                  type="number"
-                  min={1}
-                  error={errors.expiration}
-                  placeholder="7"
-                />
-                <select
-                  value={expirationUnit}
-                  onChange={(e) => {
-                    setExpirationUnit(e.target.value);
-                    if (errors.expiration) {
-                      setErrors(prev => ({ ...prev, expiration: '' }));
-                    }
-                  }}
-                  className="px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 focus:bg-white dark:focus:bg-gray-600 focus:border-blue-500 transition-all duration-200"
-                >
-                  {EXPIRATION_UNITS.map(unit => (
-                    <option key={unit.value} value={unit.value}>
-                      {unit.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              {expirationHint && (
-                <p className="text-sm text-green-600 dark:text-green-400 mt-1">
-                  {expirationHint}
+          <AnimatePresence>
+            {updateExpiration && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="space-y-3 bg-purple-50 dark:bg-purple-900/20 p-4 rounded-xl border border-purple-200 dark:border-purple-700"
+              >
+                <label className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300">
+                  <Calendar className="w-4 h-4 mr-2 text-purple-500" />
+                  New Expiration (from now)
+                </label>
+                <div className="flex space-x-3">
+                  <div className="flex-1">
+                    <FormInput
+                      value={expirationValue}
+                      onChange={(value) => {
+                        setExpirationValue(String(value));
+                        if (errors.expiration) {
+                          setErrors(prev => ({ ...prev, expiration: '' }));
+                        }
+                      }}
+                      type="number"
+                      min={1}
+                      error={errors.expiration}
+                      placeholder="7"
+                      disabled={!updateExpiration}
+                      aria-label="Expiration duration"
+                    />
+                  </div>
+                  <select
+                    value={expirationUnit}
+                    onChange={(e) => {
+                      setExpirationUnit(e.target.value);
+                      if (errors.expiration) {
+                        setErrors(prev => ({ ...prev, expiration: '' }));
+                      }
+                    }}
+                    disabled={!updateExpiration}
+                    className={`px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 focus:border-blue-500 transition-all duration-200 min-w-[120px] ${
+                      updateExpiration 
+                        ? 'bg-white dark:bg-gray-700' 
+                        : 'bg-gray-100 dark:bg-gray-800 text-gray-400'
+                    }`}
+                    aria-label="Expiration unit"
+                  >
+                    {EXPIRATION_UNITS.map(unit => (
+                      <option key={unit.value} value={unit.value}>
+                        {unit.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                {expirationHint && (
+                  <div className="flex items-center space-x-2 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-700 rounded-lg">
+                    <CheckCircle className="w-4 h-4 text-green-600" />
+                    <span className="text-sm text-green-800 dark:text-green-300">{expirationHint}</span>
+                  </div>
+                )}
+                {errors.expiration && (
+                  <div className="flex items-center space-x-2 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-700 rounded-lg">
+                    <X className="w-4 h-4 text-red-600" />
+                    <span className="text-sm text-red-800 dark:text-red-300">{errors.expiration}</span>
+                  </div>
+                )}
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  Note: Months are calculated as calendar months (28-31 days depending on the month)
                 </p>
-              )}
-              {errors.expiration && (
-                <p className="text-sm text-red-500 mt-1">{errors.expiration}</p>
-              )}
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                Note: Months are calculated as calendar months (28-31 days depending on the month)
-              </p>
-            </div>
-          )}
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
-        <div className="flex items-center space-x-2">
+        <div className="flex items-center space-x-3 p-3 bg-gray-50 dark:bg-gray-800 rounded-xl">
           <input
             type="checkbox"
             id="isActive"
             checked={formData.isActive}
             onChange={(e) => handleInputChange('isActive', e.target.checked)}
-            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            className="rounded border-gray-300 text-blue-600 focus:ring-blue-500 h-4 w-4"
+            aria-label="Key is active"
           />
-          <label htmlFor="isActive" className="text-sm font-medium text-gray-700 dark:text-gray-300">
-            Active
+          <label htmlFor="isActive" className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300">
+            <Zap className="w-4 h-4 mr-2 text-green-500" />
+            Active Key
+            <Tooltip content="When disabled, this API key will not work for requests">
+              <HelpCircle className="w-4 h-4 ml-1 text-gray-400" />
+            </Tooltip>
           </label>
         </div>
 
-        <div className="flex space-x-3 pt-4">
+        <div className="flex space-x-3 pt-4 border-t border-gray-200 dark:border-gray-700">
           <ActionButton
             onClick={onClose}
             variant="secondary"
             size="md"
             type="button"
+            className="flex-1 flex items-center justify-center space-x-2 py-3 rounded-xl hover:scale-105 transition-transform"
+            aria-label="Cancel editing"
           >
-            Cancel
+            <X className="w-4 h-4" />
+            <span>Cancel</span>
           </ActionButton>
           <ActionButton
             onClick={() => {}}
@@ -613,8 +832,11 @@ const EditModal: React.FC<{
             loading={isLoading}
             variant="primary"
             size="md"
+            className="flex-1 flex items-center justify-center space-x-2 py-3 rounded-xl hover:scale-105 transition-transform"
+            aria-label="Save changes"
           >
-            Update Key
+            <CheckCircle className="w-4 h-4" />
+            <span>Update Key</span>
           </ActionButton>
         </div>
       </form>
@@ -871,6 +1093,7 @@ const ManageKeys: React.FC = () => {
                   variant="danger"
                   size="sm"
                   icon={Trash2}
+                  className="hover:scale-105 transition-transform"
                 >
                   Delete ({selectedKeys.size})
                 </ActionButton>
@@ -884,6 +1107,7 @@ const ManageKeys: React.FC = () => {
             variant="secondary"
             size="sm"
             icon={Download}
+            className="hover:scale-105 transition-transform"
           >
             Export
           </ActionButton>
@@ -894,6 +1118,7 @@ const ManageKeys: React.FC = () => {
             variant="primary"
             size="sm"
             icon={RefreshCw}
+            className="hover:scale-105 transition-transform"
           >
             Refresh
           </ActionButton>
@@ -903,7 +1128,7 @@ const ManageKeys: React.FC = () => {
       {paginatedKeys.length > 0 ? (
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl border border-gray-200 dark:border-gray-700 overflow-hidden">
           <div className="p-6">
-            <div className="grid gap-4">
+            <div className="grid gap-6">
               {paginatedKeys.map((key) => (
                 <KeyCard
                   key={key.id}
@@ -923,17 +1148,17 @@ const ManageKeys: React.FC = () => {
               <button
                 onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                 disabled={currentPage === 1}
-                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                className="px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition-all hover:scale-105"
               >
                 Previous
               </button>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-4">
                 <span className="text-sm text-gray-600 dark:text-gray-400">
                   Page {currentPage} of {totalPages}
                 </span>
                 <button
                   onClick={selectAll}
-                  className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300"
+                  className="text-sm text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300 hover:scale-105 transition-all"
                 >
                   {selectedKeys.size === paginatedKeys.length && paginatedKeys.length > 0 ? 'Deselect All' : 'Select All'}
                 </button>
@@ -941,7 +1166,7 @@ const ManageKeys: React.FC = () => {
               <button
                 onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                 disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
+                className="px-4 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition-all hover:scale-105"
               >
                 Next
               </button>

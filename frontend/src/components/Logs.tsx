@@ -21,7 +21,12 @@ import {
   Eye,
   EyeOff,
   ArrowUp,
-  ArrowDown
+  ArrowDown,
+  Copy,
+  Check,
+  X,
+  Tag,
+  Bookmark
 } from 'lucide-react';
 import { LogEntry } from '../types';
 import apiService from '../services/api';
@@ -54,6 +59,11 @@ const Logs: React.FC = () => {
   const [showFilters, setShowFilters] = useState(false);
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [lastUpdateTime, setLastUpdateTime] = useState<Date>(new Date());
+  const [copiedLogId, setCopiedLogId] = useState<string | null>(null);
+  const [activeFilters, setActiveFilters] = useState<string[]>([]);
+  const [savedFilters, setSavedFilters] = useState<Array<{name: string, filters: any}>>([]);
+  const [filterPresetName, setFilterPresetName] = useState('');
+  const [showSaveFilter, setShowSaveFilter] = useState(false);
   
   const logsEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -89,12 +99,70 @@ const Logs: React.FC = () => {
     return () => clearInterval(interval);
   }, []);
 
+  useEffect(() => {
+    updateActiveFilters();
+  }, [searchTerm, levelFilter, componentFilter]);
+
   function handleWebSocketMessage(event: { type: string; data?: LogEntry }) {
     if (isStreaming && event.type === 'log_entry' && event.data) {
       addLog(event.data);
       setLastUpdateTime(new Date());
     }
   }
+
+  const updateActiveFilters = () => {
+    const filters: string[] = [];
+    if (searchTerm.trim()) filters.push(`search:${searchTerm.trim()}`);
+    if (levelFilter !== 'all') filters.push(`level:${levelFilter}`);
+    if (componentFilter !== 'all') filters.push(`component:${componentFilter}`);
+    setActiveFilters(filters);
+  };
+
+  const removeFilter = (filterToRemove: string) => {
+    const [type, value] = filterToRemove.split(':');
+    switch (type) {
+      case 'search':
+        setSearchTerm('');
+        break;
+      case 'level':
+        setLevelFilter('all');
+        break;
+      case 'component':
+        setComponentFilter('all');
+        break;
+    }
+  };
+
+  const saveCurrentFilter = () => {
+    if (!filterPresetName.trim()) return;
+    
+    const newFilter = {
+      name: filterPresetName,
+      filters: {
+        searchTerm,
+        levelFilter,
+        componentFilter
+      }
+    };
+    
+    setSavedFilters(prev => [...prev, newFilter]);
+    setFilterPresetName('');
+    setShowSaveFilter(false);
+    toast.success(`Filter "${filterPresetName}" saved`);
+  };
+
+  const applySavedFilter = (savedFilter: any) => {
+    setSearchTerm(savedFilter.filters.searchTerm);
+    setLevelFilter(savedFilter.filters.levelFilter);
+    setComponentFilter(savedFilter.filters.componentFilter);
+    toast.success(`Applied filter "${savedFilter.name}"`);
+  };
+
+  const deleteSavedFilter = (index: number) => {
+    const filterName = savedFilters[index].name;
+    setSavedFilters(prev => prev.filter((_, i) => i !== index));
+    toast.success(`Filter "${filterName}" deleted`);
+  };
 
   const fetchLogs = useCallback(async (pageNum = 1, append = false) => {
     try {
@@ -182,6 +250,21 @@ const Logs: React.FC = () => {
       newExpanded.add(logId);
     }
     setExpandedLogs(newExpanded);
+  };
+
+  const copyLogEntry = async (log: LogEntry) => {
+    const logText = `[${log.timestamp}] ${log.level} ${log.component}: ${log.message}${
+      log.metadata ? '\nMetadata: ' + JSON.stringify(log.metadata, null, 2) : ''
+    }`;
+    
+    try {
+      await navigator.clipboard.writeText(logText);
+      setCopiedLogId(log.id || `${log.timestamp}-${log.component}`);
+      setTimeout(() => setCopiedLogId(null), 2000);
+      toast.success('Log entry copied to clipboard');
+    } catch (error) {
+      toast.error('Failed to copy log entry');
+    }
   };
 
   const exportLogs = () => {
@@ -281,33 +364,52 @@ const Logs: React.FC = () => {
     }
   };
 
-  const getLogColors = (level: string) => {
+  const getLogColors = (level: string, index: number) => {
+    const baseColors = index % 2 === 0 
+      ? 'bg-white dark:bg-gray-800' 
+      : 'bg-gray-50 dark:bg-gray-750';
+    
     switch (level) {
       case 'INFO':
-        return 'border-l-blue-500 bg-blue-50 dark:bg-blue-900/20';
+        return `border-l-blue-500 ${baseColors}`;
       case 'WARN':
-        return 'border-l-yellow-500 bg-yellow-50 dark:bg-yellow-900/20';
+        return `border-l-yellow-500 ${baseColors}`;
       case 'ERROR':
-        return 'border-l-red-500 bg-red-50 dark:bg-red-900/20';
+        return `border-l-red-500 ${baseColors}`;
       case 'DEBUG':
-        return 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20';
+        return `border-l-gray-500 ${baseColors}`;
       default:
-        return 'border-l-gray-500 bg-gray-50 dark:bg-gray-900/20';
+        return `border-l-gray-500 ${baseColors}`;
     }
   };
 
   const getLogTextColors = (level: string) => {
     switch (level) {
       case 'INFO':
-        return 'text-blue-800 dark:text-blue-400';
+        return 'text-blue-600 dark:text-blue-400';
       case 'WARN':
-        return 'text-yellow-800 dark:text-yellow-400';
+        return 'text-yellow-600 dark:text-yellow-400';
       case 'ERROR':
-        return 'text-red-800 dark:text-red-400';
+        return 'text-red-600 dark:text-red-400';
       case 'DEBUG':
-        return 'text-gray-800 dark:text-gray-400';
+        return 'text-gray-600 dark:text-gray-400';
       default:
-        return 'text-gray-800 dark:text-gray-400';
+        return 'text-gray-600 dark:text-gray-400';
+    }
+  };
+
+  const getLogEmojiIcon = (level: string) => {
+    switch (level) {
+      case 'INFO':
+        return 'ℹ️';
+      case 'WARN':
+        return '⚠️';
+      case 'ERROR':
+        return '❌';
+      case 'DEBUG':
+        return '🐞';
+      default:
+        return 'ℹ️';
     }
   };
 
@@ -368,8 +470,16 @@ const Logs: React.FC = () => {
             variant={isStreaming ? 'success' : 'secondary'}
             size="sm"
             icon={isStreaming ? Pause : Play}
+            className={isStreaming ? 'animate-pulse' : ''}
           >
-            {isStreaming ? 'Pause' : 'Stream'}
+            {isStreaming ? (
+              <div className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-green-400 rounded-full animate-ping"></div>
+                <span>Streaming</span>
+              </div>
+            ) : (
+              'Stream'
+            )}
           </ActionButton>
 
           <ActionButton
@@ -394,6 +504,40 @@ const Logs: React.FC = () => {
           </ActionButton>
         </div>
       </div>
+
+      {activeFilters.length > 0 && (
+        <div className="flex flex-wrap gap-2 items-center">
+          <span className="text-sm text-gray-600 dark:text-gray-400">Active filters:</span>
+          {activeFilters.map((filter, index) => {
+            const [type, value] = filter.split(':');
+            return (
+              <motion.div
+                key={index}
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+                className="flex items-center space-x-1 bg-blue-100 dark:bg-blue-900/30 text-blue-800 dark:text-blue-400 px-3 py-1 rounded-full text-sm"
+              >
+                <Tag className="w-3 h-3" />
+                <span>{type}:</span>
+                <span className="font-medium">{value}</span>
+                <button
+                  onClick={() => removeFilter(filter)}
+                  className="ml-1 hover:bg-blue-200 dark:hover:bg-blue-800 rounded-full p-0.5 transition-colors"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              </motion.div>
+            );
+          })}
+          <button
+            onClick={clearFilters}
+            className="text-sm text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+          >
+            Clear all
+          </button>
+        </div>
+      )}
 
       <AnimatePresence>
         {showFilters && (
@@ -439,12 +583,78 @@ const Logs: React.FC = () => {
                 </select>
               </div>
 
-              <div className="flex items-end">
+              <div className="flex items-end space-x-2">
                 <ActionButton onClick={clearFilters} variant="secondary" size="sm">
                   Clear Filters
                 </ActionButton>
+                <ActionButton
+                  onClick={() => setShowSaveFilter(!showSaveFilter)}
+                  variant="primary"
+                  size="sm"
+                  icon={Bookmark}
+                >
+                  Save
+                </ActionButton>
               </div>
             </div>
+
+            <AnimatePresence>
+              {showSaveFilter && (
+                <motion.div
+                  initial={{ opacity: 0, height: 0 }}
+                  animate={{ opacity: 1, height: 'auto' }}
+                  exit={{ opacity: 0, height: 0 }}
+                  className="border-t pt-4"
+                >
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      placeholder="Filter preset name..."
+                      value={filterPresetName}
+                      onChange={(e) => setFilterPresetName(e.target.value)}
+                      className="flex-1 px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 focus:border-blue-500 text-sm"
+                    />
+                    <ActionButton
+                      onClick={saveCurrentFilter}
+                      disabled={!filterPresetName.trim()}
+                      variant="success"
+                      size="sm"
+                    >
+                      Save
+                    </ActionButton>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            {savedFilters.length > 0 && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                  Saved Filter Presets
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  {savedFilters.map((savedFilter, index) => (
+                    <div
+                      key={index}
+                      className="flex items-center space-x-2 bg-gray-100 dark:bg-gray-700 px-3 py-2 rounded-lg"
+                    >
+                      <button
+                        onClick={() => applySavedFilter(savedFilter)}
+                        className="text-sm text-gray-700 dark:text-gray-300 hover:text-blue-600 dark:hover:text-blue-400 transition-colors"
+                      >
+                        {savedFilter.name}
+                      </button>
+                      <button
+                        onClick={() => deleteSavedFilter(index)}
+                        className="text-red-500 hover:text-red-700 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -510,7 +720,7 @@ const Logs: React.FC = () => {
         <div
           ref={containerRef}
           onScroll={handleScroll}
-          className="max-h-[600px] overflow-y-auto space-y-2 p-4"
+          className="max-h-[600px] overflow-y-auto"
         >
           <AnimatePresence>
             {filteredLogs.map((log, index) => {
@@ -519,6 +729,7 @@ const Logs: React.FC = () => {
               const isExpanded = expandedLogs.has(logId);
               const hasMetadata = log.metadata && Object.keys(log.metadata).length > 0;
               const timestamps = getFormattedTimestamp(log.timestamp);
+              const isCopied = copiedLogId === logId;
 
               return (
                 <motion.div
@@ -526,36 +737,61 @@ const Logs: React.FC = () => {
                   initial={{ opacity: 0, x: -20 }}
                   animate={{ opacity: 1, x: 0 }}
                   exit={{ opacity: 0, x: 20 }}
-                  transition={{ delay: index * 0.02 }}
-                  className={`p-4 rounded-xl border-l-4 transition-all duration-200 hover:shadow-md ${getLogColors(log.level)}`}
+                  transition={{ delay: index * 0.01 }}
+                  className={`p-4 border-l-4 transition-all duration-200 hover:shadow-sm border-b border-gray-100 dark:border-gray-700 last:border-b-0 ${getLogColors(log.level, index)}`}
                 >
                   <div className="flex items-start space-x-3">
-                    <IconComponent className={`w-5 h-5 mt-0.5 flex-shrink-0 ${getLogTextColors(log.level)}`} />
+                    <div className="flex items-center space-x-2 flex-shrink-0">
+                      <span className="text-lg">{getLogEmojiIcon(log.level)}</span>
+                      <IconComponent className={`w-4 h-4 ${getLogTextColors(log.level)}`} />
+                    </div>
 
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <span className={`text-xs font-bold px-2 py-1 rounded-full ${
-                          log.level === 'ERROR' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' :
-                          log.level === 'WARN' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400' :
-                          log.level === 'INFO' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400' :
-                          'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400'
-                        }`}>
-                          {log.level}
-                        </span>
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center space-x-2 flex-wrap">
+                          <span className={`text-xs font-bold px-2 py-1 rounded-full ${
+                            log.level === 'ERROR' ? 'bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400' :
+                            log.level === 'WARN' ? 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400' :
+                            log.level === 'INFO' ? 'bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400' :
+                            'bg-gray-100 text-gray-800 dark:bg-gray-900/30 dark:text-gray-400'
+                          }`}>
+                            {log.level}
+                          </span>
 
-                        <span className="text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
-                          {log.component}
-                        </span>
+                          <span className="text-xs font-medium text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 px-2 py-1 rounded">
+                            {log.component}
+                          </span>
 
-                        <div className="flex items-center space-x-2 text-xs text-gray-500 dark:text-gray-400 ml-auto">
-                          <Clock className="w-3 h-3" />
-                          <span title={timestamps.relative}>{timestamps.time}</span>
-                          <Calendar className="w-3 h-3 ml-2" />
-                          <span>{timestamps.date}</span>
+                          <div className="flex items-center space-x-2 bg-gray-50 dark:bg-gray-700 px-2 py-1 rounded-lg">
+                            <Clock className="w-3 h-3 text-gray-500" />
+                            <span className="text-xs text-gray-600 dark:text-gray-400 font-mono" title={timestamps.relative}>
+                              🕒 {timestamps.time}
+                            </span>
+                            <Calendar className="w-3 h-3 text-gray-500 ml-1" />
+                            <span className="text-xs text-gray-600 dark:text-gray-400">
+                              {timestamps.date}
+                            </span>
+                          </div>
+
+                          <div className="text-xs text-gray-500 dark:text-gray-400 bg-gray-50 dark:bg-gray-700 px-2 py-1 rounded">
+                            {timestamps.relative}
+                          </div>
                         </div>
+
+                        <button
+                          onClick={() => copyLogEntry(log)}
+                          className="p-1.5 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 transition-colors rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+                          title="Copy log entry"
+                        >
+                          {isCopied ? (
+                            <Check className="w-4 h-4 text-green-500" />
+                          ) : (
+                            <Copy className="w-4 h-4" />
+                          )}
+                        </button>
                       </div>
 
-                      <p className="text-sm text-gray-900 dark:text-gray-100 break-words leading-relaxed">
+                      <p className="text-sm text-gray-900 dark:text-gray-100 break-words leading-relaxed font-mono bg-gray-50 dark:bg-gray-900 p-3 rounded-lg">
                         {log.message}
                       </p>
 
@@ -565,10 +801,10 @@ const Logs: React.FC = () => {
                             whileHover={{ scale: 1.01 }}
                             whileTap={{ scale: 0.99 }}
                             onClick={() => toggleLogExpansion(logId)}
-                            className="flex items-center space-x-2 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors"
+                            className="flex items-center space-x-2 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300 transition-colors bg-gray-50 dark:bg-gray-700 px-3 py-2 rounded-lg"
                           >
                             {isExpanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-                            <span>Metadata ({Object.keys(log.metadata).length} items)</span>
+                            <span>📋 Metadata ({Object.keys(log.metadata).length} items)</span>
                           </motion.button>
 
                           <AnimatePresence>
@@ -579,7 +815,7 @@ const Logs: React.FC = () => {
                                 exit={{ opacity: 0, height: 0 }}
                                 className="mt-2 p-3 bg-gray-50 dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-600"
                               >
-                                <pre className="text-xs text-gray-700 dark:text-gray-300 overflow-x-auto whitespace-pre-wrap">
+                                <pre className="text-xs text-gray-700 dark:text-gray-300 overflow-x-auto whitespace-pre-wrap font-mono">
                                   {JSON.stringify(log.metadata, null, 2)}
                                 </pre>
                               </motion.div>
@@ -595,7 +831,7 @@ const Logs: React.FC = () => {
           </AnimatePresence>
 
           {hasMore && (
-            <div className="text-center py-4">
+            <div className="text-center py-4 border-t border-gray-100 dark:border-gray-700">
               <ActionButton
                 onClick={loadMore}
                 disabled={logsLoading}
