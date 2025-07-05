@@ -1647,20 +1647,28 @@ func (m *APIKeyManager) staticFileHandler() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 
+		if strings.HasPrefix(requestPath, "/server/") {
+			c.Next()
+			return
+		}
+
 		filePath := path.Join("frontend/dist", requestPath)
 
 		file, err := staticFiles.Open(filePath)
 		if err != nil {
+			c.Next()
 			return
 		}
 		defer file.Close()
 
 		stat, err := file.Stat()
 		if err != nil {
+			c.Next()
 			return
 		}
 
 		if stat.IsDir() {
+			c.Next()
 			return
 		}
 
@@ -1668,9 +1676,7 @@ func (m *APIKeyManager) staticFileHandler() gin.HandlerFunc {
 		contentType := mime.TypeByExtension(ext)
 		if contentType == "" {
 			switch ext {
-			case ".js":
-				contentType = "application/javascript"
-			case ".mjs":
+			case ".js", ".mjs":
 				contentType = "application/javascript"
 			case ".css":
 				contentType = "text/css"
@@ -1706,6 +1712,7 @@ func (m *APIKeyManager) staticFileHandler() gin.HandlerFunc {
 
 		data, err := fs.ReadFile(staticFiles, filePath)
 		if err != nil {
+			c.Next()
 			return
 		}
 
@@ -1792,26 +1799,29 @@ func main() {
 	router.Use(manager.corsMiddleware())
 	router.Use(manager.validationMiddleware())
 
-	router.POST("/api/v1/auth/login", manager.loginHandler)
-	router.GET("/api/v1/health", manager.healthHandler)
-	router.GET("/api/v1/ws", manager.wsHandler)
-
-	api := router.Group("/api/v1")
-	api.Use(manager.authMiddleware())
+	serverGroup := router.Group("/server")
 	{
-		api.POST("/keys", manager.createAPIKeyHandler)
-		api.GET("/keys", manager.listAPIKeysHandler)
-		api.GET("/keys/:id", manager.getAPIKeyHandler)
-		api.PUT("/keys/:id", manager.updateAPIKeyHandler)
-		api.DELETE("/keys/:id", manager.deleteAPIKeyHandler)
-		api.POST("/keys/clean", manager.cleanExpiredKeysHandler)
-		api.GET("/logs", manager.getLogsHandler)
+		serverGroup.POST("/api/v1/auth/login", manager.loginHandler)
+		serverGroup.GET("/api/v1/health", manager.healthHandler)
+		serverGroup.GET("/api/v1/ws", manager.wsHandler)
+
+		api := serverGroup.Group("/api/v1")
+		api.Use(manager.authMiddleware())
+		{
+			api.POST("/keys", manager.createAPIKeyHandler)
+			api.GET("/keys", manager.listAPIKeysHandler)
+			api.GET("/keys/:id", manager.getAPIKeyHandler)
+			api.PUT("/keys/:id", manager.updateAPIKeyHandler)
+			api.DELETE("/keys/:id", manager.deleteAPIKeyHandler)
+			api.POST("/keys/clean", manager.cleanExpiredKeysHandler)
+			api.GET("/logs", manager.getLogsHandler)
+		}
 	}
 
 	router.Use(manager.staticFileHandler())
 
 	router.NoRoute(func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+		if strings.HasPrefix(c.Request.URL.Path, "/server/") {
 			manager.respondWithError(c, http.StatusNotFound, "API endpoint not found", "ENDPOINT_NOT_FOUND", nil)
 			return
 		}

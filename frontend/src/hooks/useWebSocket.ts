@@ -32,10 +32,9 @@ const DEFAULT_OPTIONS: Required<UseWebSocketOptions> = {
   onMessage: () => {}
 };
 
-// Custom hook for managing toast notifications to prevent spam
 const useToastManager = () => {
   const lastToastTimes = useRef<Record<string, number>>({});
-  const MIN_TOAST_INTERVAL = 5000; // 5 seconds minimum between same toast types
+  const MIN_TOAST_INTERVAL = 5000;
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info', id?: string) => {
     const toastId = id || `${type}-${message}`;
@@ -43,7 +42,6 @@ const useToastManager = () => {
     const lastTime = lastToastTimes.current[toastId] || 0;
 
     if (now - lastTime >= MIN_TOAST_INTERVAL) {
-      // Import toast dynamically to avoid circular dependencies
       import('react-hot-toast').then(({ default: toast }) => {
         switch (type) {
           case 'success':
@@ -147,7 +145,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
           break;
 
         case 'pong':
-          // Heartbeat response - no action needed
           break;
 
         case 'error':
@@ -165,7 +162,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
           console.log('Unknown WebSocket event type:', event.type);
       }
 
-      // Call external message handler if provided
       config.onMessage?.(event);
     } catch (error) {
       console.error('Error handling WebSocket message:', error);
@@ -230,7 +226,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       const currentWs = ws.current;
       ws.current = null;
       
-      // Remove event listeners to prevent memory leaks
       currentWs.onopen = null;
       currentWs.onmessage = null;
       currentWs.onclose = null;
@@ -277,7 +272,7 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
       setConnectionState('connecting');
 
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//${window.location.host}/api/v1/ws?token=${encodeURIComponent(token)}`;
+      const wsUrl = `${protocol}//${window.location.host}/server/api/v1/ws?token=${encodeURIComponent(token)}`;
       
       console.log('Attempting WebSocket connection');
       
@@ -336,7 +331,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
         stopHeartbeat();
         updateConnectionStatus({ websocket: false });
         
-        // Only attempt reconnection for unexpected closures
         if (event.code !== 1000 && reconnectAttempts.current < config.maxReconnectAttempts) {
           setConnectionState('reconnecting');
           const delay = Math.min(
@@ -414,7 +408,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
         return false;
       }
     } else {
-      // Queue message if not connected but don't exceed max queue size
       if (messageQueue.current.length < config.maxQueueSize) {
         messageQueue.current.push(message as WSEvent);
         console.log('Message queued for sending when connection is available');
@@ -450,7 +443,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     };
   }, [isConnected, connectionState, metrics, config.maxReconnectAttempts]);
 
-  // Initialize connection when token is available
   useEffect(() => {
     const token = localStorage.getItem('token');
     if (token && !isConnectingRef.current) {
@@ -460,7 +452,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     }
   }, [connect]);
 
-  // Handle visibility change and network events
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (!mountedRef.current) return;
@@ -538,7 +529,6 @@ export const useWebSocket = (options: UseWebSocketOptions = {}) => {
     };
   }, [connect, disconnect, isConnected, startHeartbeat, stopHeartbeat, updateConnectionStatus]);
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       mountedRef.current = false;

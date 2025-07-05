@@ -1,5 +1,5 @@
-import React, { useEffect, Suspense, lazy, useCallback } from 'react';
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom';
+import React, { useEffect, Suspense, lazy, useCallback, useState } from 'react';
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from './hooks/useAuth';
 import { useWebSocket } from './hooks/useWebSocket';
@@ -8,6 +8,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import { LoadingSpinner } from './components/shared';
 import { WSEvent } from './types';
 import toast from 'react-hot-toast';
+import apiService from './services/api';
 
 // Lazy load components for better performance
 const Layout = lazy(() => import('./components/Layout'));
@@ -59,13 +60,86 @@ const SuspenseWrapper: React.FC<{
 
 // Protected route wrapper with better error handling
 const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, validateToken } = useAuth();
   const location = useLocation();
+  
+  // Validate token on each protected route access
+  useEffect(() => {
+    if (isAuthenticated && !validateToken()) {
+      // Token validation failed, user will be logged out by validateToken()
+      return;
+    }
+  }, [isAuthenticated, validateToken, location.pathname]);
   
   if (!isAuthenticated) {
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
   
+  return <>{children}</>;
+};
+
+// Authentication guard that validates tokens and handles redirects
+const AuthGuard: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isAuthenticated, validateToken, token } = useAuth();
+  const [isValidating, setIsValidating] = useState(true);
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    const validateAuth = async () => {
+      try {
+        if (token) {
+          // Set token in API service
+          apiService.setAuthToken(token);
+          
+          // Validate token
+          if (!validateToken()) {
+            console.log('Token validation failed');
+            setIsValidating(false);
+            return;
+          }
+
+          // Test API connection with current token
+          try {
+            await apiService.getHealth();
+            console.log('Token validation successful');
+          } catch (error) {
+            console.log('API test failed, token may be invalid');
+            validateToken(); // This will trigger logout if token is invalid
+          }
+        }
+      } catch (error) {
+        console.error('Auth validation error:', error);
+      } finally {
+        setIsValidating(false);
+      }
+    };
+
+    validateAuth();
+  }, [token, validateToken]);
+
+  // Handle redirect after login
+  useEffect(() => {
+    if (isAuthenticated && location.pathname === '/login') {
+      const redirectPath = sessionStorage.getItem('redirectAfterLogin');
+      if (redirectPath && redirectPath !== '/login') {
+        sessionStorage.removeItem('redirectAfterLogin');
+        navigate(redirectPath, { replace: true });
+      } else {
+        navigate('/', { replace: true });
+      }
+    }
+  }, [isAuthenticated, location.pathname, navigate]);
+
+  if (isValidating) {
+    return (
+      <LoadingSpinner 
+        message="Validating your session..." 
+        overlay={true}
+      />
+    );
+  }
+
   return <>{children}</>;
 };
 
@@ -108,11 +182,24 @@ class ToastManager {
 }
 
 const App: React.FC = () => {
-  const { isAuthenticated } = useAuth();
+  const { isAuthenticated, checkTokenExpiry } = useAuth();
   const { setCurrentPage, updateConnectionStatus } = useStore();
   const location = useLocation();
   
   const toastManager = ToastManager.getInstance();
+
+  // Periodic token validation
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const interval = setInterval(() => {
+      if (!checkTokenExpiry()) {
+        console.log('Token expired, user logged out');
+      }
+    }, 30000); // Check every 30 seconds
+
+    return () => clearInterval(interval);
+  }, [isAuthenticated, checkTokenExpiry]);
 
   // WebSocket message handler with improved error handling
   const handleWebSocketMessage = useCallback((event: WSEvent) => {
@@ -261,9 +348,7 @@ const App: React.FC = () => {
           'error',
           'session-expired'
         );
-        setTimeout(() => {
-          window.location.href = '/login';
-        }, 2000);
+        // Don't redirect here as it's handled by API service
       } else if (reason?.message?.includes('Network Error') || reason?.message?.includes('fetch')) {
         toastManager.showToast(
           'Network connection problem. Please check your internet connection.',
@@ -380,98 +465,100 @@ const App: React.FC = () => {
 
   return (
     <ErrorBoundary onError={handleGlobalError}>
-      <motion.div
-        initial={{ opacity: 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.3 }}
-        className="min-h-screen bg-gray-50 dark:bg-gray-900"
-      >
-        <Routes>
-          <Route
-            path="/login"
-            element={
-              isAuthenticated ? (
-                <Navigate to="/" replace />
-              ) : (
-                <SuspenseWrapper identifier="login page">
-                  <Login />
-                </SuspenseWrapper>
-              )
-            }
-          />
-          <Route
-            path="/"
-            element={
-              <ProtectedRoute>
-                <SuspenseWrapper identifier="dashboard">
-                  <Layout />
-                </SuspenseWrapper>
-              </ProtectedRoute>
-            }
-          >
-            <Route index element={<Navigate to="/create" replace />} />
-            <Route 
-              path="create" 
+      <AuthGuard>
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ duration: 0.3 }}
+          className="min-h-screen bg-gray-50 dark:bg-gray-900"
+        >
+          <Routes>
+            <Route
+              path="/login"
               element={
-                <SuspenseWrapper identifier="key creation form">
-                  <CreateKey />
-                </SuspenseWrapper>
-              } 
+                isAuthenticated ? (
+                  <Navigate to="/" replace />
+                ) : (
+                  <SuspenseWrapper identifier="login page">
+                    <Login />
+                  </SuspenseWrapper>
+                )
+              }
             />
-            <Route 
-              path="manage" 
+            <Route
+              path="/"
               element={
-                <SuspenseWrapper identifier="key management">
-                  <ManageKeys />
-                </SuspenseWrapper>
-              } 
-            />
-            <Route 
-              path="logs" 
-              element={
-                <SuspenseWrapper identifier="system logs">
-                  <Logs />
-                </SuspenseWrapper>
-              } 
-            />
-          </Route>
-          <Route 
-            path="*" 
-            element={
-              <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
-                <div className="text-center space-y-4">
-                  <h1 className="text-4xl font-bold text-gray-900 dark:text-white">404</h1>
-                  <p className="text-gray-600 dark:text-gray-400">Page not found</p>
-                  <motion.button
-                    whileHover={{ scale: 1.05 }}
-                    whileTap={{ scale: 0.95 }}
-                    onClick={() => window.location.href = '/'}
-                    className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
-                  >
-                    Go Home
-                  </motion.button>
-                </div>
-              </div>
-            } 
-          />
-        </Routes>
-
-        {/* Offline indicator */}
-        <AnimatePresence>
-          {typeof navigator !== 'undefined' && !navigator.onLine && (
-            <motion.div
-              initial={{ y: -100, opacity: 0 }}
-              animate={{ y: 0, opacity: 1 }}
-              exit={{ y: -100, opacity: 0 }}
-              className="fixed top-0 left-0 right-0 bg-yellow-500 text-white text-center py-2 z-50"
+                <ProtectedRoute>
+                  <SuspenseWrapper identifier="dashboard">
+                    <Layout />
+                  </SuspenseWrapper>
+                </ProtectedRoute>
+              }
             >
-              <p className="text-sm font-medium">
-                You are currently offline. Some features may not be available.
-              </p>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </motion.div>
+              <Route index element={<Navigate to="/create" replace />} />
+              <Route 
+                path="create" 
+                element={
+                  <SuspenseWrapper identifier="key creation form">
+                    <CreateKey />
+                  </SuspenseWrapper>
+                } 
+              />
+              <Route 
+                path="manage" 
+                element={
+                  <SuspenseWrapper identifier="key management">
+                    <ManageKeys />
+                  </SuspenseWrapper>
+                } 
+              />
+              <Route 
+                path="logs" 
+                element={
+                  <SuspenseWrapper identifier="system logs">
+                    <Logs />
+                  </SuspenseWrapper>
+                } 
+              />
+            </Route>
+            <Route 
+              path="*" 
+              element={
+                <div className="min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
+                  <div className="text-center space-y-4">
+                    <h1 className="text-4xl font-bold text-gray-900 dark:text-white">404</h1>
+                    <p className="text-gray-600 dark:text-gray-400">Page not found</p>
+                    <motion.button
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => window.location.href = '/'}
+                      className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
+                    >
+                      Go Home
+                    </motion.button>
+                  </div>
+                </div>
+              } 
+            />
+          </Routes>
+
+          {/* Offline indicator */}
+          <AnimatePresence>
+            {typeof navigator !== 'undefined' && !navigator.onLine && (
+              <motion.div
+                initial={{ y: -100, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                exit={{ y: -100, opacity: 0 }}
+                className="fixed top-0 left-0 right-0 bg-yellow-500 text-white text-center py-2 z-50"
+              >
+                <p className="text-sm font-medium">
+                  You are currently offline. Some features may not be available.
+                </p>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </motion.div>
+      </AuthGuard>
     </ErrorBoundary>
   );
 };

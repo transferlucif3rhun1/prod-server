@@ -43,15 +43,12 @@ export interface LogEntry {
 }
 
 export interface SystemStats {
-  totalKeys: number;
-  activeKeys: number;
-  expiredKeys: number;
-  totalRequests: number;
   uptime: number;
+  totalKeys: number;
   memoryUsage: number;
-  goRoutines: number;
   mongoStatus: boolean;
   cacheHitRate: number;
+  goRoutines: number;
 }
 
 export interface PaginationInfo {
@@ -334,10 +331,6 @@ export interface HealthResponse {
 export interface LoginResponse {
   token: string;
   expiresAt: number;
-  user?: {
-    id: string;
-    role: string;
-  };
 }
 
 export interface CreateKeyResponse extends ApiResponse<APIKey> {
