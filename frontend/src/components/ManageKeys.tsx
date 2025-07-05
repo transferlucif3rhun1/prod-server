@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Search, MoreVertical, Edit3, Trash2, RefreshCw, Download,
-  Calendar, Activity, Users, Zap, Plus, Grid, List, Filter
+  Calendar, Activity, Users, Zap, Plus, Copy, Clock
 } from 'lucide-react';
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
@@ -13,7 +13,6 @@ import {
   ActionButton, 
   StatusBadge, 
   EmptyState, 
-  CopyButton,
   Modal,
   FormInput,
   formatValue,
@@ -30,7 +29,6 @@ interface EditFormData {
   isActive: boolean;
 }
 
-type ViewMode = 'table' | 'cards';
 type KeyStatus = 'active' | 'expired' | 'inactive';
 
 const getKeyStatus = (key: APIKey): KeyStatus => {
@@ -79,21 +77,50 @@ const validateExpirationUpdate = (expirationStr: string): string | null => {
   return null;
 };
 
+const getExpirationHint = (value: string, unit: string): string => {
+  const numValue = parseInt(value, 10);
+  if (isNaN(numValue) || numValue < 1) return '';
+  
+  const now = new Date();
+  let futureDate = new Date(now);
+  
+  switch (unit) {
+    case 'm':
+      futureDate.setMinutes(futureDate.getMinutes() + numValue);
+      break;
+    case 'h':
+      futureDate.setHours(futureDate.getHours() + numValue);
+      break;
+    case 'd':
+      futureDate.setDate(futureDate.getDate() + numValue);
+      break;
+    case 'w':
+      futureDate.setDate(futureDate.getDate() + (numValue * 7));
+      break;
+    case 'mo':
+      futureDate.setMonth(futureDate.getMonth() + numValue);
+      break;
+    case 'y':
+      futureDate.setFullYear(futureDate.getFullYear() + numValue);
+      break;
+    default:
+      return '';
+  }
+  
+  return `Will expire on ${format(futureDate, 'MMM dd, yyyy HH:mm')}`;
+};
+
 const FilterControls: React.FC<{
   searchTerm: string;
   filterStatus: string;
   onSearchChange: (value: string) => void;
   onFilterChange: (value: string) => void;
-  viewMode: ViewMode;
-  onViewModeChange: (mode: ViewMode) => void;
   totalCounts: { total: number; active: number; expired: number; inactive: number };
 }> = ({ 
   searchTerm, 
   filterStatus, 
   onSearchChange, 
-  onFilterChange, 
-  viewMode, 
-  onViewModeChange,
+  onFilterChange,
   totalCounts 
 }) => (
   <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
@@ -120,89 +147,8 @@ const FilterControls: React.FC<{
         <option value="inactive">Inactive ({totalCounts.inactive})</option>
       </select>
     </div>
-
-    <div className="flex items-center bg-gray-100 dark:bg-gray-700 rounded-lg p-1">
-      <button
-        onClick={() => onViewModeChange('table')}
-        className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-          viewMode === 'table'
-            ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
-            : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
-        }`}
-      >
-        <List className="w-4 h-4" />
-      </button>
-      <button
-        onClick={() => onViewModeChange('cards')}
-        className={`px-3 py-2 rounded-md text-sm font-medium transition-colors ${
-          viewMode === 'cards'
-            ? 'bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm'
-            : 'text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-300'
-        }`}
-      >
-        <Grid className="w-4 h-4" />
-      </button>
-    </div>
   </div>
 );
-
-const ActionMenu: React.FC<{
-  keyId: string;
-  keyName?: string;
-  onEdit: () => void;
-  onDelete: () => void;
-  onCopy: () => void;
-  isOpen: boolean;
-  onClose: () => void;
-}> = ({ keyId, keyName, onEdit, onDelete, onCopy, isOpen, onClose }) => {
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      const target = event.target as HTMLElement;
-      if (!target.closest(`[data-menu="${keyId}"]`)) {
-        onClose();
-      }
-    };
-
-    if (isOpen) {
-      document.addEventListener('click', handleClickOutside);
-    }
-
-    return () => document.removeEventListener('click', handleClickOutside);
-  }, [isOpen, keyId, onClose]);
-
-  if (!isOpen) return null;
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, scale: 0.95 }}
-      animate={{ opacity: 1, scale: 1 }}
-      exit={{ opacity: 0, scale: 0.95 }}
-      className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-10 min-w-[150px]"
-      data-menu={keyId}
-    >
-      <button
-        onClick={onCopy}
-        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 rounded-t-lg"
-      >
-        <span>Copy Key</span>
-      </button>
-      <button
-        onClick={onEdit}
-        className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2"
-      >
-        <Edit3 className="w-4 h-4" />
-        <span>Edit</span>
-      </button>
-      <button
-        onClick={onDelete}
-        className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center space-x-2 rounded-b-lg"
-      >
-        <Trash2 className="w-4 h-4" />
-        <span>Delete</span>
-      </button>
-    </motion.div>
-  );
-};
 
 const KeyCard: React.FC<{
   apiKey: APIKey;
@@ -213,7 +159,6 @@ const KeyCard: React.FC<{
   onCopy: () => void;
 }> = ({ apiKey, isSelected, onSelect, onEdit, onDelete, onCopy }) => {
   const [showActionMenu, setShowActionMenu] = useState(false);
-  const [copyState, setCopyState] = useState(false);
   
   const status = useMemo(() => getKeyStatus(apiKey), [apiKey]);
   const usageDisplay = useMemo(() => 
@@ -221,16 +166,33 @@ const KeyCard: React.FC<{
     [apiKey.usageCount, apiKey.totalRequests]
   );
 
-  const handleCopy = useCallback(async () => {
+  const handleCopy = useCallback(async (e: React.MouseEvent) => {
+    e.stopPropagation();
     try {
       await navigator.clipboard.writeText(apiKey.id);
-      setCopyState(true);
+      toast.success('API key copied to clipboard!');
       onCopy();
-      setTimeout(() => setCopyState(false), 2000);
     } catch {
       toast.error('Failed to copy to clipboard');
     }
   }, [apiKey.id, onCopy]);
+
+  const handleEdit = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowActionMenu(false);
+    onEdit();
+  }, [onEdit]);
+
+  const handleDelete = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowActionMenu(false);
+    onDelete();
+  }, [onDelete]);
+
+  const toggleMenu = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowActionMenu(prev => !prev);
+  }, []);
 
   const expirationDisplay = useMemo(() => {
     const expirationDate = new Date(apiKey.expiration);
@@ -244,11 +206,24 @@ const KeyCard: React.FC<{
     };
   }, [apiKey.expiration]);
 
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (showActionMenu) {
+        setShowActionMenu(false);
+      }
+    };
+
+    if (showActionMenu) {
+      document.addEventListener('click', handleClickOutside);
+      return () => document.removeEventListener('click', handleClickOutside);
+    }
+  }, [showActionMenu]);
+
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-md transition-all duration-200"
+      className="p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:shadow-md transition-all duration-200 bg-white dark:bg-gray-800"
     >
       <div className="flex items-center justify-between">
         <div className="flex items-center space-x-3">
@@ -271,22 +246,38 @@ const KeyCard: React.FC<{
           <StatusBadge status={status}>
             {status}
           </StatusBadge>
+          <button
+            onClick={handleCopy}
+            className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
+            title="Copy API Key"
+          >
+            <Copy className="w-4 h-4" />
+          </button>
           <div className="relative">
             <button
-              onClick={() => setShowActionMenu(!showActionMenu)}
-              className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+              onClick={toggleMenu}
+              className="p-2 text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
             >
               <MoreVertical className="w-4 h-4" />
             </button>
-            <ActionMenu
-              keyId={apiKey.id}
-              keyName={apiKey.name}
-              onEdit={onEdit}
-              onDelete={onDelete}
-              onCopy={handleCopy}
-              isOpen={showActionMenu}
-              onClose={() => setShowActionMenu(false)}
-            />
+            {showActionMenu && (
+              <div className="absolute right-0 top-full mt-1 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 min-w-[120px]">
+                <button
+                  onClick={handleEdit}
+                  className="w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 flex items-center space-x-2 rounded-t-lg"
+                >
+                  <Edit3 className="w-4 h-4" />
+                  <span>Edit</span>
+                </button>
+                <button
+                  onClick={handleDelete}
+                  className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 flex items-center space-x-2 rounded-b-lg"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  <span>Delete</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -338,6 +329,20 @@ const KeyCard: React.FC<{
   );
 };
 
+interface ExpirationUnit {
+  value: string;
+  label: string;
+}
+
+const EXPIRATION_UNITS: ExpirationUnit[] = [
+  { value: 'm', label: 'Minutes' },
+  { value: 'h', label: 'Hours' },
+  { value: 'd', label: 'Days' },
+  { value: 'w', label: 'Weeks' },
+  { value: 'mo', label: 'Months' },
+  { value: 'y', label: 'Years' }
+];
+
 const EditModal: React.FC<{
   isOpen: boolean;
   onClose: () => void;
@@ -351,7 +356,9 @@ const EditModal: React.FC<{
     totalRequests: 0,
     isActive: true
   });
-  const [expirationString, setExpirationString] = useState('');
+  const [expirationValue, setExpirationValue] = useState('');
+  const [expirationUnit, setExpirationUnit] = useState('d');
+  const [updateExpiration, setUpdateExpiration] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -364,14 +371,17 @@ const EditModal: React.FC<{
         totalRequests: apiKey.totalRequests,
         isActive: apiKey.isActive
       });
-      setExpirationString('');
+      setExpirationValue('7');
+      setExpirationUnit('d');
+      setUpdateExpiration(false);
+      setErrors({});
     }
   }, [apiKey]);
 
   const validateForm = useCallback(() => {
     const newErrors: Record<string, string> = {};
     
-    if (formData.name.trim().length < 1) {
+    if (!formData.name || formData.name.trim().length < 1) {
       newErrors.name = 'Name is required';
     }
     
@@ -387,16 +397,24 @@ const EditModal: React.FC<{
       newErrors.totalRequests = 'Total requests must be 0 or greater';
     }
     
-    if (expirationString) {
-      const expirationError = validateExpirationUpdate(expirationString);
-      if (expirationError) {
-        newErrors.expiration = expirationError;
+    if (updateExpiration) {
+      const numValue = parseInt(expirationValue, 10);
+      if (isNaN(numValue) || numValue < 1) {
+        newErrors.expiration = 'Expiration value must be at least 1';
+      } else if (numValue > 1000) {
+        newErrors.expiration = 'Expiration value too large';
+      } else {
+        const expirationString = expirationValue + expirationUnit;
+        const expirationError = validateExpirationUpdate(expirationString);
+        if (expirationError) {
+          newErrors.expiration = expirationError;
+        }
       }
     }
     
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
-  }, [formData, expirationString]);
+  }, [formData, expirationValue, expirationUnit, updateExpiration]);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
@@ -411,12 +429,18 @@ const EditModal: React.FC<{
     try {
       const updateData: UpdateKeyRequest = {};
       
-      if (formData.name !== apiKey.name) updateData.name = formData.name;
+      if (formData.name.trim() !== (apiKey.name || '').trim()) {
+        updateData.name = formData.name.trim();
+      }
       if (formData.rpm !== apiKey.rpm) updateData.rpm = formData.rpm;
       if (formData.threadsLimit !== apiKey.threadsLimit) updateData.threadsLimit = formData.threadsLimit;
       if (formData.totalRequests !== apiKey.totalRequests) updateData.totalRequests = formData.totalRequests;
       if (formData.isActive !== apiKey.isActive) updateData.isActive = formData.isActive;
-      if (expirationString) updateData.expiration = expirationString;
+      
+      if (updateExpiration) {
+        const expirationString = expirationValue + expirationUnit;
+        updateData.expiration = expirationString;
+      }
 
       if (Object.keys(updateData).length === 0) {
         toast.info('No changes detected');
@@ -425,13 +449,31 @@ const EditModal: React.FC<{
       }
 
       await onSave(updateData);
+      toast.success('API key updated successfully');
       onClose();
     } catch (error) {
       console.error('Failed to update key:', error);
+      toast.error('Failed to update API key');
     } finally {
       setIsLoading(false);
     }
-  }, [apiKey, formData, expirationString, onSave, onClose, validateForm]);
+  }, [apiKey, formData, expirationValue, expirationUnit, updateExpiration, onSave, onClose, validateForm]);
+
+  const expirationHint = useMemo(() => {
+    if (updateExpiration && expirationValue && expirationUnit) {
+      return getExpirationHint(expirationValue, expirationUnit);
+    }
+    return '';
+  }, [expirationValue, expirationUnit, updateExpiration]);
+
+  const handleInputChange = useCallback((field: keyof EditFormData, value: string | number | boolean) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+    if (errors[field]) {
+      setErrors(prev => ({ ...prev, [field]: '' }));
+    }
+  }, [errors]);
+
+  if (!isOpen) return null;
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Edit API Key">
@@ -439,16 +481,17 @@ const EditModal: React.FC<{
         <FormInput
           label="Name"
           value={formData.name}
-          onChange={(value) => setFormData(prev => ({ ...prev, name: value as string }))}
+          onChange={(value) => handleInputChange('name', value)}
           placeholder="API Key Name"
           error={errors.name}
+          required
         />
 
         <div className="grid grid-cols-2 gap-4">
           <FormInput
             label="RPM (0 = Unlimited)"
             value={formData.rpm}
-            onChange={(value) => setFormData(prev => ({ ...prev, rpm: value as number }))}
+            onChange={(value) => handleInputChange('rpm', Number(value))}
             type="number"
             min={0}
             max={10000}
@@ -458,7 +501,7 @@ const EditModal: React.FC<{
           <FormInput
             label="Threads (0 = Unlimited)"
             value={formData.threadsLimit}
-            onChange={(value) => setFormData(prev => ({ ...prev, threadsLimit: value as number }))}
+            onChange={(value) => handleInputChange('threadsLimit', Number(value))}
             type="number"
             min={0}
             max={1000}
@@ -469,26 +512,85 @@ const EditModal: React.FC<{
         <FormInput
           label="Total Requests (0 = Unlimited)"
           value={formData.totalRequests}
-          onChange={(value) => setFormData(prev => ({ ...prev, totalRequests: value as number }))}
+          onChange={(value) => handleInputChange('totalRequests', Number(value))}
           type="number"
           min={0}
           error={errors.totalRequests}
         />
 
-        <FormInput
-          label="New Expiration (Optional)"
-          value={expirationString}
-          onChange={(value) => setExpirationString(value as string)}
-          placeholder="e.g., 7d, 1mo, 1y (leave empty to keep current)"
-          error={errors.expiration}
-        />
+        <div className="space-y-4">
+          <div className="flex items-center space-x-2">
+            <input
+              type="checkbox"
+              id="updateExpiration"
+              checked={updateExpiration}
+              onChange={(e) => setUpdateExpiration(e.target.checked)}
+              className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+            />
+            <label htmlFor="updateExpiration" className="text-sm font-medium text-gray-700 dark:text-gray-300">
+              Update Expiration
+            </label>
+          </div>
+          
+          {updateExpiration && (
+            <div className="space-y-3">
+              <label className="flex items-center text-sm font-medium text-gray-700 dark:text-gray-300">
+                <Clock className="w-4 h-4 mr-2 text-green-500" />
+                New Expiration (from now)
+              </label>
+              <div className="flex space-x-3">
+                <FormInput
+                  label=""
+                  value={expirationValue}
+                  onChange={(value) => {
+                    setExpirationValue(String(value));
+                    if (errors.expiration) {
+                      setErrors(prev => ({ ...prev, expiration: '' }));
+                    }
+                  }}
+                  type="number"
+                  min={1}
+                  error={errors.expiration}
+                  placeholder="7"
+                />
+                <select
+                  value={expirationUnit}
+                  onChange={(e) => {
+                    setExpirationUnit(e.target.value);
+                    if (errors.expiration) {
+                      setErrors(prev => ({ ...prev, expiration: '' }));
+                    }
+                  }}
+                  className="px-4 py-3 rounded-xl border-2 border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-700 focus:bg-white dark:focus:bg-gray-600 focus:border-blue-500 transition-all duration-200"
+                >
+                  {EXPIRATION_UNITS.map(unit => (
+                    <option key={unit.value} value={unit.value}>
+                      {unit.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {expirationHint && (
+                <p className="text-sm text-green-600 dark:text-green-400 mt-1">
+                  {expirationHint}
+                </p>
+              )}
+              {errors.expiration && (
+                <p className="text-sm text-red-500 mt-1">{errors.expiration}</p>
+              )}
+              <p className="text-xs text-gray-500 dark:text-gray-400">
+                Note: Months are calculated as calendar months (28-31 days depending on the month)
+              </p>
+            </div>
+          )}
+        </div>
 
         <div className="flex items-center space-x-2">
           <input
             type="checkbox"
             id="isActive"
             checked={formData.isActive}
-            onChange={(e) => setFormData(prev => ({ ...prev, isActive: e.target.checked }))}
+            onChange={(e) => handleInputChange('isActive', e.target.checked)}
             className="rounded border-gray-300 text-blue-600 focus:ring-blue-500"
           />
           <label htmlFor="isActive" className="text-sm font-medium text-gray-700 dark:text-gray-300">
@@ -501,6 +603,7 @@ const EditModal: React.FC<{
             onClick={onClose}
             variant="secondary"
             size="md"
+            type="button"
           >
             Cancel
           </ActionButton>
@@ -538,7 +641,6 @@ const ManageKeys: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [editingKey, setEditingKey] = useState<APIKey | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('cards');
   const [currentPage, setCurrentPage] = useState(1);
   const [retryAttempts, setRetryAttempts] = useState(0);
   const [lastFetchTime, setLastFetchTime] = useState<number>(0);
@@ -618,7 +720,6 @@ const ManageKeys: React.FC = () => {
 
     const response = await apiService.updateKey(editingKey.id, updateData);
     updateApiKey(response.data);
-    toast.success('API key updated successfully');
   }, [editingKey, updateApiKey]);
 
   const handleDelete = useCallback(async (keyId: string, keyName?: string) => {
@@ -749,8 +850,6 @@ const ManageKeys: React.FC = () => {
         filterStatus={filterStatus}
         onSearchChange={setSearchTerm}
         onFilterChange={setFilterStatus}
-        viewMode={viewMode}
-        onViewModeChange={setViewMode}
         totalCounts={totalCounts}
       />
 
@@ -813,7 +912,7 @@ const ManageKeys: React.FC = () => {
                   onSelect={() => toggleKeySelection(key.id)}
                   onEdit={() => setEditingKey(key)}
                   onDelete={() => handleDelete(key.id, key.name)}
-                  onCopy={() => toast.success('API key copied to clipboard!')}
+                  onCopy={() => {}}
                 />
               ))}
             </div>
@@ -824,7 +923,7 @@ const ManageKeys: React.FC = () => {
               <button
                 onClick={() => setCurrentPage(Math.max(1, currentPage - 1))}
                 disabled={currentPage === 1}
-                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50"
+                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
               >
                 Previous
               </button>
@@ -842,7 +941,7 @@ const ManageKeys: React.FC = () => {
               <button
                 onClick={() => setCurrentPage(Math.min(totalPages, currentPage + 1))}
                 disabled={currentPage === totalPages}
-                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50"
+                className="px-3 py-1 text-sm border border-gray-300 dark:border-gray-600 rounded disabled:opacity-50 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors"
               >
                 Next
               </button>

@@ -42,30 +42,30 @@ import (
 var staticFiles embed.FS
 
 type Config struct {
-	ServerPort        string `json:"serverPort" validate:"required"`
-	MongoURI          string `json:"mongoURI" validate:"required"`
-	DatabaseName      string `json:"databaseName" validate:"required"`
-	ApiKeysCollection string `json:"apiKeysCollection" validate:"required"`
-	LogsCollection    string `json:"logsCollection" validate:"required"`
-	ReadTimeout       int    `json:"readTimeout" validate:"min=1,max=300"`
-	WriteTimeout      int    `json:"writeTimeout" validate:"min=1,max=300"`
-	IdleTimeout       int    `json:"idleTimeout" validate:"min=1,max=3600"`
-	JWTSecret         string `json:"jwtSecret" validate:"required,min=32"`
-	AdminPassword     string `json:"adminPassword" validate:"required,min=8"`
-	MaxRetries        int    `json:"maxRetries" validate:"min=1,max=10"`
-	RetryDelay        int    `json:"retryDelay" validate:"min=100,max=5000"`
+	ServerPort        string `json:"serverPort"`
+	MongoURI          string `json:"mongoURI"`
+	DatabaseName      string `json:"databaseName"`
+	ApiKeysCollection string `json:"apiKeysCollection"`
+	LogsCollection    string `json:"logsCollection"`
+	ReadTimeout       int    `json:"readTimeout"`
+	WriteTimeout      int    `json:"writeTimeout"`
+	IdleTimeout       int    `json:"idleTimeout"`
+	JWTSecret         string `json:"jwtSecret"`
+	AdminPassword     string `json:"adminPassword"`
+	MaxRetries        int    `json:"maxRetries"`
+	RetryDelay        int    `json:"retryDelay"`
 	LogDir            string `json:"logDir"`
 	MaxLogSize        int64  `json:"maxLogSize"`
 	MaxLogFiles       int    `json:"maxLogFiles"`
 }
 
 type APIKey struct {
-	ID            string                 `bson:"_id" json:"id" validate:"required"`
-	Name          string                 `bson:"name,omitempty" json:"name,omitempty" validate:"omitempty,min=1,max=100"`
-	Expiration    time.Time              `bson:"expiration" json:"expiration" validate:"required"`
-	RPM           int                    `bson:"rpm" json:"rpm" validate:"min=0,max=10000"`
-	ThreadsLimit  int                    `bson:"threadsLimit" json:"threadsLimit" validate:"min=0,max=1000"`
-	TotalRequests int64                  `bson:"totalRequests" json:"totalRequests" validate:"min=0"`
+	ID            string                 `bson:"_id" json:"id"`
+	Name          string                 `bson:"name,omitempty" json:"name,omitempty"`
+	Expiration    time.Time              `bson:"expiration" json:"expiration"`
+	RPM           int                    `bson:"rpm" json:"rpm"`
+	ThreadsLimit  int                    `bson:"threadsLimit" json:"threadsLimit"`
+	TotalRequests int64                  `bson:"totalRequests" json:"totalRequests"`
 	UsageCount    int64                  `bson:"usageCount" json:"usageCount"`
 	CreatedAt     time.Time              `bson:"createdAt" json:"createdAt"`
 	UpdatedAt     time.Time              `bson:"updatedAt" json:"updatedAt"`
@@ -91,34 +91,34 @@ type APIKeyResponse struct {
 
 type LogEntry struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id,omitempty"`
-	Level     string             `bson:"level" json:"level" validate:"required,oneof=INFO WARN ERROR DEBUG"`
-	Message   string             `bson:"message" json:"message" validate:"required,min=1,max=1000"`
-	Component string             `bson:"component" json:"component" validate:"required,min=1,max=50"`
+	Level     string             `bson:"level" json:"level"`
+	Message   string             `bson:"message" json:"message"`
+	Component string             `bson:"component" json:"component"`
 	Timestamp time.Time          `bson:"timestamp" json:"timestamp"`
 	Metadata  bson.M             `bson:"metadata,omitempty" json:"metadata,omitempty"`
 	UserID    string             `bson:"userId,omitempty" json:"userId,omitempty"`
 }
 
 type CreateKeyRequest struct {
-	CustomKey     string `json:"customKey" validate:"omitempty,min=16,max=64,alphanum"`
-	Name          string `json:"name" validate:"required,min=1,max=100"`
-	RPM           int    `json:"rpm" validate:"min=0,max=10000"`
-	ThreadsLimit  int    `json:"threadsLimit" validate:"min=0,max=1000"`
-	TotalRequests int64  `json:"totalRequests" validate:"min=0"`
-	Expiration    string `json:"expiration" validate:"required,min=2,max=10"`
+	CustomKey     string `json:"customKey"`
+	Name          string `json:"name"`
+	RPM           int    `json:"rpm"`
+	ThreadsLimit  int    `json:"threadsLimit"`
+	TotalRequests int64  `json:"totalRequests"`
+	Expiration    string `json:"expiration"`
 }
 
 type UpdateKeyRequest struct {
-	Name          *string `json:"name,omitempty" validate:"omitempty,min=1,max=100"`
-	RPM           *int    `json:"rpm,omitempty" validate:"omitempty,min=0,max=10000"`
-	ThreadsLimit  *int    `json:"threadsLimit,omitempty" validate:"omitempty,min=0,max=1000"`
-	TotalRequests *int64  `json:"totalRequests,omitempty" validate:"omitempty,min=0"`
-	Expiration    *string `json:"expiration,omitempty" validate:"omitempty,min=2,max=10"`
+	Name          *string `json:"name,omitempty"`
+	RPM           *int    `json:"rpm,omitempty"`
+	ThreadsLimit  *int    `json:"threadsLimit,omitempty"`
+	TotalRequests *int64  `json:"totalRequests,omitempty"`
+	Expiration    *string `json:"expiration,omitempty"`
 	IsActive      *bool   `json:"isActive,omitempty"`
 }
 
 type LoginRequest struct {
-	Password string `json:"password" validate:"required,min=1"`
+	Password string `json:"password"`
 }
 
 type TokenResponse struct {
@@ -273,7 +273,7 @@ func NewFileLogger(logDir string, maxSize int64, maxFiles int) (*FileLogger, err
 }
 
 func (fl *FileLogger) openLogFile() error {
-	filename := filepath.Join(fl.logDir, fmt.Sprintf("app_%s.log", time.Now().Format("2006-01-02")))
+	filename := filepath.Join(fl.logDir, fmt.Sprintf("app_%s.log", time.Now().UTC().Format("2006-01-02")))
 
 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
@@ -313,7 +313,7 @@ func (fl *FileLogger) Write(p []byte) (n int, err error) {
 func (fl *FileLogger) rotateLog() error {
 	fl.logFile.Close()
 
-	timestamp := time.Now().Format("2006-01-02_15-04-05")
+	timestamp := time.Now().UTC().Format("2006-01-02_15-04-05")
 	oldName := fl.logFile.Name()
 	newName := strings.Replace(oldName, ".log", fmt.Sprintf("_%s.log", timestamp), 1)
 
@@ -393,7 +393,7 @@ func (wsc *WSClient) Send(message WSMessage) error {
 	wsc.mutex.Lock()
 	defer wsc.mutex.Unlock()
 
-	wsc.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	wsc.conn.SetWriteDeadline(time.Now().UTC().Add(10 * time.Second))
 	return wsc.conn.WriteJSON(message)
 }
 
@@ -423,9 +423,6 @@ type APIKeyManager struct {
 
 func NewAPIKeyManager(config *Config) (*APIKeyManager, error) {
 	v := validator.New()
-	if err := v.Struct(config); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
-	}
 
 	fileLogger, err := NewFileLogger(config.LogDir, config.MaxLogSize, config.MaxLogFiles)
 	if err != nil {
@@ -438,7 +435,7 @@ func NewAPIKeyManager(config *Config) (*APIKeyManager, error) {
 		cache:     &Cache{},
 		config:    config,
 		validator: v,
-		startTime: time.Now(),
+		startTime: time.Now().UTC(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -503,7 +500,7 @@ func (m *APIKeyManager) logToFile(level, message string, fields ...interface{}) 
 		return
 	}
 
-	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	timestamp := time.Now().UTC().Format(time.RFC3339)
 	logLine := fmt.Sprintf("[%s] %s: %s", timestamp, level, message)
 
 	if len(fields) > 0 {
@@ -780,10 +777,6 @@ func (m *APIKeyManager) SaveAPIKey(apiKey *APIKey) error {
 		return err
 	}
 
-	if err := m.validator.Struct(apiKey); err != nil {
-		return fmt.Errorf("invalid API key data: %w", err)
-	}
-
 	ctx, cancel := context.WithTimeout(m.ctx, 15*time.Second)
 	defer cancel()
 
@@ -801,11 +794,6 @@ func (m *APIKeyManager) SaveAPIKey(apiKey *APIKey) error {
 }
 
 func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
-	if err := m.validator.Struct(req); err != nil {
-		m.Warn("Invalid create key request", "error", err, "request", fmt.Sprintf("%+v", req))
-		return nil, fmt.Errorf("invalid request: %w", err)
-	}
-
 	req.Name = strings.TrimSpace(req.Name)
 	if req.Name == "" {
 		return nil, errors.New("API key name cannot be empty")
@@ -869,11 +857,6 @@ func (m *APIKeyManager) generateAPIKey(req CreateKeyRequest) (*APIKey, error) {
 		UpdatedAt:     now,
 		IsActive:      true,
 		Metadata:      make(map[string]interface{}),
-	}
-
-	if err := m.validator.Struct(apiKey); err != nil {
-		m.Error("Generated API key failed validation", "error", err, "key", apiKey)
-		return nil, fmt.Errorf("generated API key is invalid: %w", err)
 	}
 
 	if err = m.SaveAPIKey(apiKey); err != nil {
@@ -1087,11 +1070,6 @@ func (m *APIKeyManager) loginHandler(c *gin.Context) {
 		return
 	}
 
-	if err := m.validator.Struct(req); err != nil {
-		m.respondWithError(c, http.StatusBadRequest, "Validation failed", "VALIDATION_ERROR", err)
-		return
-	}
-
 	m.Info("Login attempt", "ip", c.ClientIP())
 
 	if req.Password != m.config.AdminPassword {
@@ -1100,10 +1078,10 @@ func (m *APIKeyManager) loginHandler(c *gin.Context) {
 		return
 	}
 
-	expiresAt := time.Now().Add(24 * time.Hour)
+	expiresAt := time.Now().UTC().Add(24 * time.Hour)
 	claims := jwt.MapClaims{
 		"exp": expiresAt.Unix(),
-		"iat": time.Now().Unix(),
+		"iat": time.Now().UTC().Unix(),
 		"sub": "admin",
 		"jti": generateRequestID(),
 	}
@@ -1254,11 +1232,6 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 		return
 	}
 
-	if err := m.validator.Struct(req); err != nil {
-		m.respondWithError(c, http.StatusBadRequest, "Validation failed", "VALIDATION_ERROR", err)
-		return
-	}
-
 	apiKey, exists := m.cache.GetAPIKey(keyID)
 	if !exists {
 		m.respondWithError(c, http.StatusNotFound, "API key not found", "KEY_NOT_FOUND", nil)
@@ -1330,12 +1303,6 @@ func (m *APIKeyManager) updateAPIKeyHandler(c *gin.Context) {
 	}
 
 	apiKey.UpdatedAt = time.Now().UTC()
-
-	if err := m.validator.Struct(apiKey); err != nil {
-		m.Error("Updated API key failed validation", "keyId", keyID, "error", err)
-		m.respondWithError(c, http.StatusBadRequest, "Updated key data is invalid", "VALIDATION_ERROR", err)
-		return
-	}
 
 	if err := m.SaveAPIKey(apiKey); err != nil {
 		m.Error("Failed to update API key in database", "keyId", keyID, "error", err)
@@ -1595,7 +1562,7 @@ func (m *APIKeyManager) wsHandler(c *gin.Context) {
 	wsClient := &WSClient{
 		conn:     conn,
 		clientID: clientID,
-		lastPing: time.Now(),
+		lastPing: time.Now().UTC(),
 	}
 
 	m.wsClients.Store(clientID, wsClient)
@@ -1611,10 +1578,10 @@ func (m *APIKeyManager) handleWebSocketClient(clientID string, wsClient *WSClien
 		m.Info("WebSocket client disconnected", "clientId", clientID)
 	}()
 
-	wsClient.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	wsClient.conn.SetReadDeadline(time.Now().UTC().Add(60 * time.Second))
 	wsClient.conn.SetPongHandler(func(string) error {
-		wsClient.conn.SetReadDeadline(time.Now().Add(60 * time.Second))
-		wsClient.lastPing = time.Now()
+		wsClient.conn.SetReadDeadline(time.Now().UTC().Add(60 * time.Second))
+		wsClient.lastPing = time.Now().UTC()
 		return nil
 	})
 
