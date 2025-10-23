@@ -9,17 +9,17 @@ import {
 import { APIKey, UpdateKeyRequest } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
-import { 
-  LoadingSpinner, 
-  ErrorDisplay, 
-  ActionButton, 
-  StatusBadge, 
-  EmptyState, 
+import {
+  LoadingSpinner,
+  ErrorDisplay,
+  ActionButton,
+  StatusBadge,
+  EmptyState,
   Modal,
   FormInput,
   formatValue,
   formatUsageDisplay
-} from './shared';
+} from './Shared';
 import toast from 'react-hot-toast';
 import { format } from 'date-fns';
 
@@ -572,7 +572,7 @@ const EditModal: React.FC<{
       }
 
       if (Object.keys(updateData).length === 0) {
-        toast.info('No changes detected');
+        toast('No changes detected');
         onClose();
         return;
       }
