@@ -1,0 +1,15 @@
+# robots.txt for API Key Manager
+
+# Allow all crawlers
+User-agent: *
+Allow: /
+
+# Disallow admin and API endpoints
+Disallow: /server/
+Disallow: /api/
+
+# Sitemap location
+Sitemap: /sitemap.xml
+
+# Crawl-delay (optional, adjust as needed)
+Crawl-delay: 10

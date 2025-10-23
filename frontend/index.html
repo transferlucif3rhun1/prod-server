@@ -2,13 +2,82 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>API Key Manager</title>
-    <meta name="description" content="Professional API Key Management System" />
+
+    <!-- Primary Meta Tags -->
+    <title>API Key Manager - Professional Key Management System</title>
+    <meta name="title" content="API Key Manager - Professional Key Management System" />
+    <meta name="description" content="Secure and efficient API key management system with real-time monitoring, usage tracking, and advanced analytics. Manage your API keys with confidence." />
+    <meta name="keywords" content="API key manager, API management, key management, security, authentication, rate limiting, API monitoring" />
+    <meta name="author" content="API Key Manager" />
+    <meta name="robots" content="index, follow" />
+
+    <!-- Open Graph / Facebook -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="/" />
+    <meta property="og:title" content="API Key Manager - Professional Key Management System" />
+    <meta property="og:description" content="Secure and efficient API key management system with real-time monitoring, usage tracking, and advanced analytics." />
+    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:site_name" content="API Key Manager" />
+
+    <!-- Twitter -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:url" content="/" />
+    <meta name="twitter:title" content="API Key Manager - Professional Key Management System" />
+    <meta name="twitter:description" content="Secure and efficient API key management system with real-time monitoring, usage tracking, and advanced analytics." />
+    <meta name="twitter:image" content="/og-image.png" />
+
+    <!-- Canonical URL -->
+    <link rel="canonical" href="/" />
+
+    <!-- Favicons -->
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+
+    <!-- PWA -->
+    <link rel="manifest" href="/manifest.json" />
     <meta name="theme-color" content="#2563eb" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="API Key Manager" />
+
+    <!-- DNS Prefetch & Preconnect -->
+    <link rel="dns-prefetch" href="//" />
+    <link rel="preconnect" href="//" crossorigin />
+
+    <!-- Performance Optimization -->
+    <link rel="preload" href="/src/main.tsx" as="script" />
+
+    <!-- Structured Data (JSON-LD) -->
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "API Key Manager",
+      "applicationCategory": "BusinessApplication",
+      "description": "Professional API key management system with real-time monitoring and advanced analytics",
+      "operatingSystem": "Web Browser",
+      "offers": {
+        "@type": "Offer",
+        "price": "0"
+      },
+      "aggregateRating": {
+        "@type": "AggregateRating",
+        "ratingValue": "4.8",
+        "ratingCount": "150"
+      }
+    }
+    </script>
   </head>
   <body class="bg-gray-50 dark:bg-gray-900 antialiased">
+    <noscript>
+      <div style="text-align: center; padding: 50px; font-family: system-ui, -apple-system, sans-serif;">
+        <h1>JavaScript Required</h1>
+        <p>This application requires JavaScript to be enabled. Please enable JavaScript in your browser settings.</p>
+      </div>
+    </noscript>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

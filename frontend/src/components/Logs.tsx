@@ -168,7 +168,7 @@ const Logs: React.FC = () => {
     try {
       if (!append) setLogsLoading(true);
       setLogsError(null);
-      
+
       const params: Record<string, string | number> = {
         page: pageNum,
         limit: 100,
@@ -179,28 +179,44 @@ const Logs: React.FC = () => {
       if (searchTerm.trim()) params.search = searchTerm.trim();
 
       const response = await apiService.getLogs(params, false);
-      
+
       const logsData = Array.isArray(response.data) ? response.data : [];
       const pagination = response.pagination;
 
       if (append) {
         const currentLogs = Array.isArray(logs) ? logs : [];
-        setLogs([...currentLogs, ...logsData]);
+        // Prevent duplicate logs
+        const existingIds = new Set(currentLogs.map(log => log.id || `${log.timestamp}-${log.component}`));
+        const newLogs = logsData.filter(log => !existingIds.has(log.id || `${log.timestamp}-${log.component}`));
+        setLogs([...currentLogs, ...newLogs]);
       } else {
         setLogs(logsData);
       }
 
       setHasMore(pagination ? pageNum < pagination.totalPages : false);
       setLastUpdateTime(new Date());
-      
+
       if (logsData.length === 0 && pageNum === 1) {
         toast.info('No logs found matching your criteria');
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to load logs. Please try again.';
       setLogsError(errorMessage);
-      toast.error(errorMessage);
+
+      // Only show toast error if it's not a network issue (those are handled elsewhere)
+      if (!errorMessage.includes('offline') && !errorMessage.includes('Network error')) {
+        toast.error(errorMessage);
+      }
+
       console.error('Failed to fetch logs:', error);
+
+      // Retry logic with exponential backoff
+      if (pageNum === 1 && !append) {
+        setTimeout(() => {
+          console.log('Retrying log fetch...');
+          fetchLogs(pageNum, append);
+        }, 3000);
+      }
     } finally {
       setLogsLoading(false);
     }

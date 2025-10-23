@@ -1,6 +1,7 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"embed"
@@ -393,7 +394,7 @@ func (wsc *WSClient) Send(message WSMessage) error {
 	wsc.mutex.Lock()
 	defer wsc.mutex.Unlock()
 
-	wsc.conn.SetWriteDeadline(time.Now().UTC().Add(10 * time.Second))
+	wsc.conn.SetWriteDeadline(time.Now().UTC().Add(60 * time.Second))
 	return wsc.conn.WriteJSON(message)
 }
 
@@ -401,6 +402,62 @@ func (wsc *WSClient) Close() error {
 	wsc.mutex.Lock()
 	defer wsc.mutex.Unlock()
 	return wsc.conn.Close()
+}
+
+type RateLimiter struct {
+	attempts map[string][]time.Time
+	mutex    sync.RWMutex
+}
+
+func NewRateLimiter() *RateLimiter {
+	return &RateLimiter{
+		attempts: make(map[string][]time.Time),
+	}
+}
+
+func (rl *RateLimiter) Allow(key string, maxAttempts int, window time.Duration) bool {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-window)
+
+	attempts := rl.attempts[key]
+	var validAttempts []time.Time
+	for _, t := range attempts {
+		if t.After(cutoff) {
+			validAttempts = append(validAttempts, t)
+		}
+	}
+
+	if len(validAttempts) >= maxAttempts {
+		rl.attempts[key] = validAttempts
+		return false
+	}
+
+	validAttempts = append(validAttempts, now)
+	rl.attempts[key] = validAttempts
+	return true
+}
+
+func (rl *RateLimiter) Cleanup() {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
+
+	cutoff := time.Now().Add(-10 * time.Minute)
+	for key, attempts := range rl.attempts {
+		var validAttempts []time.Time
+		for _, t := range attempts {
+			if t.After(cutoff) {
+				validAttempts = append(validAttempts, t)
+			}
+		}
+		if len(validAttempts) == 0 {
+			delete(rl.attempts, key)
+		} else {
+			rl.attempts[key] = validAttempts
+		}
+	}
 }
 
 type APIKeyManager struct {
@@ -419,6 +476,7 @@ type APIKeyManager struct {
 	cancel            context.CancelFunc
 	mongoConnected    int32
 	fileLogger        *FileLogger
+	rateLimiter       *RateLimiter
 }
 
 func NewAPIKeyManager(config *Config) (*APIKeyManager, error) {
@@ -432,13 +490,22 @@ func NewAPIKeyManager(config *Config) (*APIKeyManager, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &APIKeyManager{
-		cache:     &Cache{},
-		config:    config,
-		validator: v,
-		startTime: time.Now().UTC(),
+		cache:       &Cache{},
+		config:      config,
+		validator:   v,
+		startTime:   time.Now().UTC(),
+		rateLimiter: NewRateLimiter(),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
-				return true
+				origin := r.Header.Get("Origin")
+				// Allow same-origin and localhost during development
+				if origin == "" {
+					return true
+				}
+				// In production, you should whitelist specific origins
+				return strings.Contains(origin, "localhost") ||
+					strings.Contains(origin, "127.0.0.1") ||
+					strings.Contains(origin, r.Host)
 			},
 			ReadBufferSize:  1024,
 			WriteBufferSize: 1024,
@@ -448,6 +515,20 @@ func NewAPIKeyManager(config *Config) (*APIKeyManager, error) {
 		cancel:     cancel,
 		fileLogger: fileLogger,
 	}
+
+	// Start rate limiter cleanup routine
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				manager.rateLimiter.Cleanup()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
 
 	return manager, nil
 }
@@ -910,14 +991,91 @@ func (m *APIKeyManager) validationMiddleware() gin.HandlerFunc {
 
 func (m *APIKeyManager) corsMiddleware() gin.HandlerFunc {
 	config := cors.Config{
-		AllowOrigins:     []string{"*"},
+		AllowOrigins:     []string{"http://localhost:*", "http://127.0.0.1:*", "http://[::1]:*"},
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Length", "Content-Type", "Authorization", "X-Requested-With"},
-		ExposeHeaders:    []string{"Content-Length"},
-		AllowCredentials: false,
+		ExposeHeaders:    []string{"Content-Length", "X-Request-ID"},
+		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
+		AllowWildcard:    true,
 	}
 	return cors.New(config)
+}
+
+func (m *APIKeyManager) securityHeadersMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Prevent clickjacking
+		c.Header("X-Frame-Options", "DENY")
+
+		// Prevent MIME type sniffing
+		c.Header("X-Content-Type-Options", "nosniff")
+
+		// Enable XSS protection
+		c.Header("X-XSS-Protection", "1; mode=block")
+
+		// Referrer Policy
+		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		// Content Security Policy
+		csp := "default-src 'self'; " +
+			"script-src 'self' 'unsafe-inline' 'unsafe-eval'; " +
+			"style-src 'self' 'unsafe-inline'; " +
+			"img-src 'self' data: https:; " +
+			"font-src 'self' data:; " +
+			"connect-src 'self' ws: wss:; " +
+			"frame-ancestors 'none'; " +
+			"base-uri 'self'; " +
+			"form-action 'self'"
+		c.Header("Content-Security-Policy", csp)
+
+		// HSTS (only for HTTPS)
+		if c.Request.TLS != nil {
+			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+
+		// Permissions Policy
+		c.Header("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+
+		c.Next()
+	}
+}
+
+type gzipWriter struct {
+	gin.ResponseWriter
+	writer *gzip.Writer
+}
+
+func (g *gzipWriter) Write(data []byte) (int, error) {
+	return g.writer.Write(data)
+}
+
+func (m *APIKeyManager) gzipMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !strings.Contains(c.Request.Header.Get("Accept-Encoding"), "gzip") {
+			c.Next()
+			return
+		}
+
+		// Skip compression for WebSocket connections
+		if strings.Contains(c.Request.Header.Get("Connection"), "Upgrade") {
+			c.Next()
+			return
+		}
+
+		gz := gzip.NewWriter(c.Writer)
+		defer gz.Close()
+
+		c.Header("Content-Encoding", "gzip")
+		c.Header("Vary", "Accept-Encoding")
+
+		gzipWriter := &gzipWriter{
+			ResponseWriter: c.Writer,
+			writer:         gz,
+		}
+		c.Writer = gzipWriter
+
+		c.Next()
+	}
 }
 
 func (m *APIKeyManager) requestIDMiddleware() gin.HandlerFunc {
@@ -1064,17 +1222,26 @@ func (m *APIKeyManager) healthHandler(c *gin.Context) {
 }
 
 func (m *APIKeyManager) loginHandler(c *gin.Context) {
-	var req LoginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		m.respondWithError(c, http.StatusBadRequest, "Invalid request format", "INVALID_REQUEST", err)
+	clientIP := c.ClientIP()
+
+	// Rate limiting: 5 attempts per 15 minutes
+	if !m.rateLimiter.Allow(clientIP, 5, 15*time.Minute) {
+		m.Warn("Rate limit exceeded for login", "ip", clientIP)
+		m.respondWithError(c, http.StatusTooManyRequests, "Too many login attempts. Please try again later.", "RATE_LIMIT_EXCEEDED", nil)
 		return
 	}
 
-	m.Info("Login attempt", "ip", c.ClientIP())
+	var req LoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		m.respondWithError(c, http.StatusBadRequest, "Invalid request format", "INVALID_REQUEST", nil)
+		return
+	}
+
+	m.Info("Login attempt", "ip", clientIP)
 
 	if req.Password != m.config.AdminPassword {
-		m.Warn("Failed login attempt", "ip", c.ClientIP())
-		m.respondWithError(c, http.StatusUnauthorized, "Invalid password", "AUTH_FAILED", nil)
+		m.Warn("Failed login attempt", "ip", clientIP)
+		m.respondWithError(c, http.StatusUnauthorized, "Invalid credentials", "AUTH_FAILED", nil)
 		return
 	}
 
@@ -1578,34 +1745,45 @@ func (m *APIKeyManager) handleWebSocketClient(clientID string, wsClient *WSClien
 		m.Info("WebSocket client disconnected", "clientId", clientID)
 	}()
 
-	wsClient.conn.SetReadDeadline(time.Now().UTC().Add(60 * time.Second))
+	wsClient.conn.SetReadDeadline(time.Now().UTC().Add(90 * time.Second))
 	wsClient.conn.SetPongHandler(func(string) error {
-		wsClient.conn.SetReadDeadline(time.Now().UTC().Add(60 * time.Second))
+		wsClient.conn.SetReadDeadline(time.Now().UTC().Add(90 * time.Second))
 		wsClient.lastPing = time.Now().UTC()
 		return nil
 	})
 
-	pingTicker := time.NewTicker(30 * time.Second)
+	pingTicker := time.NewTicker(45 * time.Second)
 	defer pingTicker.Stop()
+
+	// Handle incoming messages in a separate goroutine
+	messageChan := make(chan []byte, 10)
+	errorChan := make(chan error, 1)
+
+	go func() {
+		for {
+			_, message, err := wsClient.conn.ReadMessage()
+			if err != nil {
+				errorChan <- err
+				return
+			}
+			messageChan <- message
+		}
+	}()
 
 	for {
 		select {
 		case <-m.ctx.Done():
 			return
 		case <-pingTicker.C:
-			if err := wsClient.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			wsClient.mutex.Lock()
+			wsClient.conn.SetWriteDeadline(time.Now().UTC().Add(60 * time.Second))
+			err := wsClient.conn.WriteMessage(websocket.PingMessage, nil)
+			wsClient.mutex.Unlock()
+			if err != nil {
 				m.Warn("Failed to send ping", "clientId", clientID, "error", err)
 				return
 			}
-		default:
-			_, message, err := wsClient.conn.ReadMessage()
-			if err != nil {
-				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-					m.Warn("WebSocket unexpected close", "clientId", clientID, "error", err)
-				}
-				return
-			}
-
+		case message := <-messageChan:
 			var wsMsg map[string]interface{}
 			if err := json.Unmarshal(message, &wsMsg); err == nil {
 				if msgType, ok := wsMsg["type"].(string); ok && msgType == "ping" {
@@ -1614,10 +1792,18 @@ func (m *APIKeyManager) handleWebSocketClient(clientID string, wsClient *WSClien
 						"timestamp": time.Now().UTC(),
 					}
 					if data, err := json.Marshal(response); err == nil {
-						wsClient.conn.WriteMessage(websocket.TextMessage, data)
+						wsClient.Send(WSMessage{
+							Type:      "pong",
+							Timestamp: time.Now().UTC(),
+						})
 					}
 				}
 			}
+		case err := <-errorChan:
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				m.Warn("WebSocket unexpected close", "clientId", clientID, "error", err)
+			}
+			return
 		}
 	}
 }
@@ -1779,7 +1965,20 @@ func (m *APIKeyManager) staticFileHandler() gin.HandlerFunc {
 		}
 
 		c.Header("Content-Type", contentType)
-		c.Header("Cache-Control", "public, max-age=31536000")
+
+		// Set appropriate cache headers based on file type
+		if ext == ".html" {
+			// Don't cache HTML files (especially index.html)
+			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+			c.Header("Pragma", "no-cache")
+			c.Header("Expires", "0")
+		} else if ext == ".js" || ext == ".css" {
+			// Cache JS and CSS with revalidation
+			c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		} else {
+			// Cache other static assets
+			c.Header("Cache-Control", "public, max-age=604800")
+		}
 
 		data, err := fs.ReadFile(staticFiles, filePath)
 		if err != nil {
@@ -1867,7 +2066,9 @@ func main() {
 	router.Use(manager.loggingMiddleware())
 	router.Use(gin.Recovery())
 	router.Use(manager.requestIDMiddleware())
+	router.Use(manager.securityHeadersMiddleware())
 	router.Use(manager.corsMiddleware())
+	router.Use(manager.gzipMiddleware())
 	router.Use(manager.validationMiddleware())
 
 	serverGroup := router.Group("/server")
