@@ -5,7 +5,7 @@ import { useAuth } from './hooks/useAuth';
 import { useWebSocket } from './hooks/useWebSocket';
 import { useStore } from './store/useStore';
 import ErrorBoundary from './components/ErrorBoundary';
-import { LoadingSpinner } from './components/shared';
+import { LoadingSpinner } from './components/Shared';
 import { WSEvent } from './types';
 import toast from 'react-hot-toast';
 import apiService from './services/api';

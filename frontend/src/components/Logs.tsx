@@ -32,7 +32,7 @@ import { LogEntry } from '../types';
 import apiService from '../services/api';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { LoadingSpinner, ActionButton, MetricCard } from '../components/shared';
+import { LoadingSpinner, ActionButton, MetricCard } from './Shared';
 import toast from 'react-hot-toast';
 import { format, formatDistanceToNow } from 'date-fns';
 
@@ -67,7 +67,7 @@ const Logs: React.FC = () => {
   
   const logsEndRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { isConnected } = useWebSocket(handleWebSocketMessage);
+  const { isConnected } = useWebSocket({ onMessage: handleWebSocketMessage });
 
   const logLevels = ['all', 'INFO', 'WARN', 'ERROR', 'DEBUG'];
 
@@ -197,7 +197,7 @@ const Logs: React.FC = () => {
       setLastUpdateTime(new Date());
 
       if (logsData.length === 0 && pageNum === 1) {
-        toast.info('No logs found matching your criteria');
+        toast('No logs found matching your criteria');
       }
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to load logs. Please try again.';

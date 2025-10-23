@@ -1787,16 +1787,10 @@ func (m *APIKeyManager) handleWebSocketClient(clientID string, wsClient *WSClien
 			var wsMsg map[string]interface{}
 			if err := json.Unmarshal(message, &wsMsg); err == nil {
 				if msgType, ok := wsMsg["type"].(string); ok && msgType == "ping" {
-					response := map[string]interface{}{
-						"type":      "pong",
-						"timestamp": time.Now().UTC(),
-					}
-					if data, err := json.Marshal(response); err == nil {
-						wsClient.Send(WSMessage{
-							Type:      "pong",
-							Timestamp: time.Now().UTC(),
-						})
-					}
+					wsClient.Send(WSMessage{
+						Type:      "pong",
+						Timestamp: time.Now().UTC(),
+					})
 				}
 			}
 		case err := <-errorChan:
