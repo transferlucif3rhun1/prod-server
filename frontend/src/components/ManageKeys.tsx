@@ -20,7 +20,7 @@ import {
   formatValue,
   formatUsageDisplay
 } from './Shared';
-import toast from 'react-hot-toast';
+import { notifications } from '../utils/smartToast';
 import { format } from 'date-fns';
 
 interface EditFormData {
@@ -259,10 +259,10 @@ const KeyCard: React.FC<{
     e.stopPropagation();
     try {
       await navigator.clipboard.writeText(apiKey.id);
-      toast.success('API key copied to clipboard!');
+      notifications.apiKey.copySuccess(); // Silent - visual feedback is sufficient
       onCopy();
     } catch {
-      toast.error('Failed to copy to clipboard');
+      notifications.apiKey.copyError();
     }
   }, [apiKey.id, onCopy]);
 
@@ -550,14 +550,14 @@ const EditModal: React.FC<{
     if (!apiKey) return;
 
     if (!validateForm()) {
-      toast.error('Please fix the form errors');
+      notifications.form.validationError();
       return;
     }
 
     setIsLoading(true);
     try {
       const updateData: UpdateKeyRequest = {};
-      
+
       if (formData.name.trim() !== (apiKey.name || '').trim()) {
         updateData.name = formData.name.trim();
       }
@@ -565,24 +565,24 @@ const EditModal: React.FC<{
       if (formData.threadsLimit !== apiKey.threadsLimit) updateData.threadsLimit = formData.threadsLimit;
       if (formData.totalRequests !== apiKey.totalRequests) updateData.totalRequests = formData.totalRequests;
       if (formData.isActive !== apiKey.isActive) updateData.isActive = formData.isActive;
-      
+
       if (updateExpiration) {
         const expirationString = expirationValue + expirationUnit;
         updateData.expiration = expirationString;
       }
 
       if (Object.keys(updateData).length === 0) {
-        toast('No changes detected');
-        onClose();
+        onClose(); // Silent close - no changes is not worth a notification
         return;
       }
 
       await onSave(updateData);
-      toast.success('API key updated successfully');
+      notifications.apiKey.updated();
       onClose();
     } catch (error) {
       console.error('Failed to update key:', error);
-      toast.error('Failed to update API key');
+      const errorMessage = error instanceof Error ? error.message : 'Failed to update API key';
+      notifications.apiKey.updateError(errorMessage);
     } finally {
       setIsLoading(false);
     }
@@ -953,10 +953,10 @@ const ManageKeys: React.FC = () => {
     try {
       await apiService.deleteKey(keyId);
       removeApiKey(keyId);
-      toast.success(`API key "${displayName}" deleted successfully`);
+      notifications.apiKey.deleted(displayName);
     } catch (error: unknown) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to delete API key';
-      toast.error(errorMessage);
+      notifications.apiKey.deleteError(errorMessage);
     }
   }, [removeApiKey]);
 
@@ -987,19 +987,19 @@ const ManageKeys: React.FC = () => {
       clearSelectedKeys();
 
       if (successKeys.length > 0) {
-        toast.success(`Successfully deleted ${successKeys.length} API key(s)`);
+        notifications.bulk.deleteSuccess(successKeys.length);
       }
       if (failedKeys.length > 0) {
-        toast.error(`Failed to delete ${failedKeys.length} API key(s). Please try again.`);
+        notifications.bulk.deleteError(failedKeys.length);
       }
     } catch {
-      toast.error('Bulk delete operation failed. Please try again.');
+      notifications.bulk.deleteError(selectedKeys.size);
     }
   }, [selectedKeys, removeApiKey, clearSelectedKeys]);
 
   const exportKeys = useCallback(() => {
     if (filteredKeys.length === 0) {
-      toast.error('No API keys to export');
+      notifications.data.exportError();
       return;
     }
 
@@ -1025,7 +1025,7 @@ const ManageKeys: React.FC = () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast.success(`Exported ${filteredKeys.length} API keys`);
+    notifications.data.exportSuccess(); // Silent - download is enough feedback
   }, [filteredKeys]);
 
   const toggleKeySelection = useCallback((keyId: string) => {

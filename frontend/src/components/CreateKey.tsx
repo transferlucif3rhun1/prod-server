@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { 
-  Key, Clock, Zap, Users, RefreshCw, 
+import {
+  Key, Clock, Zap, Users, RefreshCw,
   Sparkles, Code, Shield, Timer, AlertTriangle,
   Info, CheckCircle, RotateCcw
 } from 'lucide-react';
+import { notifications } from '../utils/smartToast';
 
 // Mock types and services for demo
 interface CreateKeyRequest {
@@ -582,8 +583,8 @@ const CreateKey: React.FC = () => {
       expiration: updateExpiration(expirationValue, expirationUnit)
     }));
     setErrors({});
-    toast.success(`Applied ${preset.name} preset`);
-    
+    notifications.form.presetApplied(); // Silent - visual feedback is sufficient
+
     setTimeout(() => setHighlightedFields(new Set()), 600);
   }, [updateExpiration]);
 
@@ -592,12 +593,12 @@ const CreateKey: React.FC = () => {
     setCreatedKey(null);
     setErrors({});
     setHighlightedFields(new Set());
-    toast.success('Form reset to defaults');
+    notifications.form.resetSuccess(); // Silent - visual feedback is sufficient
   }, []);
 
   const handleSubmit = useCallback(async () => {
     if (!validateForm()) {
-      toast.error('Please fix the form errors');
+      notifications.form.validationError();
       return;
     }
 
@@ -605,17 +606,17 @@ const CreateKey: React.FC = () => {
 
     try {
       const { expirationValue: _expirationValue, expirationUnit: _expirationUnit, ...submitData } = formData;
-      
+
       if (!submitData.expiration) {
         submitData.expiration = updateExpiration(formData.expirationValue, formData.expirationUnit);
       }
-      
+
       const response = await apiService.createKey(submitData);
-      
+
       setCreatedKey(response.data);
       addApiKey(response.data);
-      toast.success('API key created successfully!');
-      
+      notifications.apiKey.created(); // High priority notification
+
       setFormData(prev => ({
         ...prev,
         name: '',
@@ -623,7 +624,8 @@ const CreateKey: React.FC = () => {
       }));
       setErrors({});
     } catch (error: unknown) {
-      toast.error('Failed to create API key');
+      const errorMessage = error instanceof Error ? error.message : 'Failed to create API key';
+      notifications.apiKey.createError(errorMessage);
     } finally {
       setIsLoading(false);
     }
