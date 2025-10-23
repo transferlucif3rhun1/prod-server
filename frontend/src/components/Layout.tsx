@@ -22,7 +22,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { useStore } from '../store/useStore';
 import apiService from '../services/api';
 import { SystemStats, APIKey } from '../types';
-import toast from 'react-hot-toast';
+import { notifications } from '../utils/smartToast';
 
 interface MetricCardProps {
   icon: React.ElementType;
@@ -419,7 +419,7 @@ const Layout: React.FC = () => {
 
   const handleLogout = useCallback(() => {
     logout();
-    toast.success('Logged out successfully');
+    notifications.auth.logoutSuccess(); // Silent - navigation is enough feedback
     window.location.href = '/login';
   }, [logout]);
 

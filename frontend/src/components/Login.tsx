@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Key, Lock, Eye, EyeOff, Shield } from 'lucide-react';
 import { useAuth } from '../hooks/useAuth';
-import toast from 'react-hot-toast';
+import { notifications } from '../utils/smartToast';
 
 const Login: React.FC = () => {
   const [password, setPassword] = useState('');
@@ -14,24 +14,24 @@ const Login: React.FC = () => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     if (!password.trim()) {
-      toast.error('Please enter your password');
+      notifications.auth.loginError('Please enter your password');
       return;
     }
 
     setIsLoading(true);
-    
+
     try {
       const success = await login(password);
       if (success) {
-        toast.success('Login successful!');
+        notifications.auth.loginSuccess();
         navigate('/');
       } else {
-        toast.error('Invalid password');
+        notifications.auth.loginError('Invalid credentials');
       }
     } catch {
-      toast.error('Login failed. Please try again.');
+      notifications.auth.loginError('Login failed. Please try again.');
     } finally {
       setIsLoading(false);
     }

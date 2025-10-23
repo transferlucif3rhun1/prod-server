@@ -33,7 +33,7 @@ import apiService from '../services/api';
 import { useStore } from '../store/useStore';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { LoadingSpinner, ActionButton, MetricCard } from './Shared';
-import toast from 'react-hot-toast';
+import { notifications } from '../utils/smartToast';
 import { format, formatDistanceToNow } from 'date-fns';
 
 const Logs: React.FC = () => {
@@ -148,20 +148,20 @@ const Logs: React.FC = () => {
     setSavedFilters(prev => [...prev, newFilter]);
     setFilterPresetName('');
     setShowSaveFilter(false);
-    toast.success(`Filter "${filterPresetName}" saved`);
+    notifications.filter.saved(); // Silent - visual feedback is sufficient
   };
 
   const applySavedFilter = (savedFilter: any) => {
     setSearchTerm(savedFilter.filters.searchTerm);
     setLevelFilter(savedFilter.filters.levelFilter);
     setComponentFilter(savedFilter.filters.componentFilter);
-    toast.success(`Applied filter "${savedFilter.name}"`);
+    notifications.filter.applied(); // Silent - visual feedback is sufficient
   };
 
   const deleteSavedFilter = (index: number) => {
     const filterName = savedFilters[index].name;
     setSavedFilters(prev => prev.filter((_, i) => i !== index));
-    toast.success(`Filter "${filterName}" deleted`);
+    notifications.filter.deleted(); // Silent - visual feedback is sufficient
   };
 
   const fetchLogs = useCallback(async (pageNum = 1, append = false) => {
@@ -205,7 +205,7 @@ const Logs: React.FC = () => {
 
       // Only show toast error if it's not a network issue (those are handled elsewhere)
       if (!errorMessage.includes('offline') && !errorMessage.includes('Network error')) {
-        toast.error(errorMessage);
+        notifications.logs.loadError(errorMessage);
       }
 
       console.error('Failed to fetch logs:', error);
@@ -277,15 +277,15 @@ const Logs: React.FC = () => {
       await navigator.clipboard.writeText(logText);
       setCopiedLogId(log.id || `${log.timestamp}-${log.component}`);
       setTimeout(() => setCopiedLogId(null), 2000);
-      toast.success('Log entry copied to clipboard');
+      notifications.logs.copySuccess(); // Silent - visual feedback (checkmark) is sufficient
     } catch (error) {
-      toast.error('Failed to copy log entry');
+      notifications.logs.copyError();
     }
   };
 
   const exportLogs = () => {
     if (filteredLogs.length === 0) {
-      toast.error('No logs to export');
+      notifications.logs.exportError();
       return;
     }
 
@@ -306,7 +306,7 @@ const Logs: React.FC = () => {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-    toast.success(`Exported ${filteredLogs.length} log entries`);
+    notifications.logs.exportSuccess(); // Silent - download is enough feedback
   };
 
   const clearFilters = () => {
@@ -315,7 +315,7 @@ const Logs: React.FC = () => {
     setComponentFilter('all');
     setPage(1);
     setShowFilters(false);
-    toast.success('Filters cleared');
+    notifications.filter.cleared(); // Silent - visual feedback is sufficient
   };
 
   const refreshLogs = () => {
@@ -335,11 +335,12 @@ const Logs: React.FC = () => {
   const toggleStreaming = () => {
     const newStreaming = !isStreaming;
     setIsStreaming(newStreaming);
-    
+
+    // Silent - visual indicator (Play/Pause icon) is enough feedback
     if (newStreaming) {
-      toast.success('Real-time log streaming enabled');
+      notifications.logs.streamingEnabled();
     } else {
-      toast.success('Real-time log streaming paused');
+      notifications.logs.streamingDisabled();
     }
   };
 
